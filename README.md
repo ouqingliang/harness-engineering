@@ -6,7 +6,7 @@ It is the control shell that will let multiple AI workers keep working for long 
 
 ## Purpose
 
-Harness Engineering exists to solve a different problem from the current product code under `center/`, `client/`, and `engineer/`.
+Harness Engineering exists to solve a different problem from the current product code under `src/center/`, `src/client/`, and `src/engineer/`.
 
 - product code answers: how do `Center` and `Client` deliver real support and task execution
 - harness code answers: how do AI workers keep designing, implementing, reviewing, cleaning up, and escalating correctly over long-running work

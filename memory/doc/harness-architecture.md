@@ -4,7 +4,7 @@
 
 This document defines the independent Harness Engineering system for this repository.
 
-It does not redefine product runtime behavior inside `center/`, `client/`, or `engineer/`.
+It does not redefine product runtime behavior inside `src/center/`, `src/client/`, or `src/engineer/`.
 It defines how AI workers should be orchestrated so they can keep shipping code, reviewing work, cleaning drift, and escalating only at explicit decision gates.
 
 ## Boundary
