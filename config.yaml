@@ -1,0 +1,19 @@
+# Run a single inspection pass by default.
+watch: false
+
+# Poll interval when watch=true.
+sleep_seconds: 5.0
+
+# In deployment this should point to center-owned memory.
+memory_root: runtime-memory
+
+# The harness supervisor is expected to open a human gate only for these classes.
+decision_gate_tags:
+  - architecture_change
+  - destructive_action
+  - security_boundary
+  - external_side_effect
+  - goal_conflict
+
+# Preferred launcher for specialist agents.
+default_launcher: codex_app_server

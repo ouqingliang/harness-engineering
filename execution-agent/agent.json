@@ -1,0 +1,16 @@
+{
+  "id": "execution",
+  "name": "Execution Agent",
+  "description": "Owns the main implementation work for the active slice.",
+  "enabled": true,
+  "order": 30,
+  "task": {
+    "id": "execution",
+    "title": "Implement the approved slice",
+    "goal": "Follow the current design contract, make the required code changes, run targeted verification, and leave execution artifacts that audit can validate.",
+    "system_prompt_path": "system.md"
+  },
+  "dependencies": [
+    "design"
+  ]
+}

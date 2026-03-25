@@ -1,0 +1,16 @@
+{
+  "id": "design",
+  "name": "Design Agent",
+  "description": "Owns architecture, contracts, and implementation plans for the active mission.",
+  "enabled": true,
+  "order": 20,
+  "task": {
+    "id": "design",
+    "title": "Design the next approved slice",
+    "goal": "Read the active mission and durable harness memory, define or update the architecture contract for the next implementation slice, and write artifacts that downstream execution can follow without guessing.",
+    "system_prompt_path": "system.md"
+  },
+  "dependencies": [
+    "communication"
+  ]
+}
