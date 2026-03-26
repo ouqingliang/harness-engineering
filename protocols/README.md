@@ -1,10 +1,9 @@
 # Protocols
 
-This directory will hold the protocol contracts between:
+This directory is only for tiny shared file formats if the runtime actually needs them.
 
-- harness supervisor and specialist agents
-- harness and `Center`
-- harness and remote `Client` execution surfaces
-- harness and Codex App Server based AI worker sessions
+Keep the rule simple:
 
-The protocol baseline is intentionally separate from product code so the harness can evolve without hiding its control contracts inside unrelated runtime modules.
+- if a small JSON file in `.harness/` is enough, use that
+- do not build a large protocol layer in advance
+- do not move core runtime understanding out of the scheduler and agent docs

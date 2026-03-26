@@ -8,17 +8,18 @@ Build and maintain the harness that lets AI workers continue meaningful software
 
 - bounded context
 - explicit role separation
-- durable artifacts
-- human escalation only at decision gates
+- durable runtime state
+- human escalation only at real decision gates
 
 ## Stable Truths
 
-- the harness is a control system, not a product feature folder
-- the harness is independent from the old `EngineerNode` runtime model
+- the harness is a control shell around agents
 - `supervisor` owns orchestration truth
-- specialist agents own narrow scopes and must leave durable artifacts
-- human involvement is reserved for decision gates, not routine execution
-- active long-term task memory is center-owned in deployment
+- specialist agents own narrow scopes
+- routine blockers should be handled inside the harness first
+- only `communication-agent` should face the human
+- active runtime state lives under `.harness/`
+- work is not done until the required verification has actually passed
 
 ## Default Reading Order
 
@@ -30,12 +31,16 @@ Build and maintain the harness that lets AI workers continue meaningful software
 
 ## Working Rules
 
+- keep the runtime simple
+- keep all runtime roles under `agents/`
 - keep role boundaries sharp
-- write artifacts that another agent can resume from
-- prefer explicit contracts over improvised shared assumptions
-- do not reintroduce `EngineerNode` as a live architecture object
-- do not mix product-runtime concerns with harness-runtime concerns
-- keep active runtime state under `.harness`, not `.agents`
+- read repository docs and runtime text artifacts as UTF-8
+- write repository docs and runtime text artifacts as UTF-8
+- pass work through handoffs and reports, not implicit chat memory
+- let `supervisor` answer ordinary blockers first
+- keep active runtime state under `.harness/`
+- require real verification before closing work
+- use subagent to complete your jobs.
 
 ## Decision Gates
 
@@ -47,4 +52,4 @@ Escalate to the human only for:
 - external side effects with cost or risk
 - unresolved priority conflicts
 
-Everything else should stay in the autonomous loop.
+Everything else should stay inside the autonomous loop.

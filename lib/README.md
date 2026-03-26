@@ -1,18 +1,25 @@
-# Library Plan
+# Library Runtime
 
-This directory will hold harness-specific shared modules.
+This directory holds the current small helpers for the harness runtime.
 
-Planned modules:
+Current modules:
 
-- `work_orders.py`
-  - shared work-order schemas and serialization helpers
-- `app_server_bridge.py`
-  - Codex App Server session bridge, event handling, and item capture
-- `remote_command_proxy.py`
-  - forwarding layer for remote Client execution and command-result return
-- `memory_client.py`
-  - center-owned memory namespace client
-- `audit_sink.py`
-  - acceptance and findings write path
-- `artifact_store.py`
-  - structured artifact persistence helpers
+- `scheduler.py`
+  - the main loop helper
+- `runtime_state.py`
+  - load and save `.harness/state.json`
+- `handoff.py`
+  - read and write handoff files
+- `report.py`
+  - read and write agent reports
+- `question_router.py`
+  - ordinary blocker interception
+- `runner_bridge.py`
+  - thin wrapper around runner calls
+- `supervisor_bridge.py`
+  - thin adapter that exposes supervisor runtime state to the communication surface
+
+Current rule:
+
+- keep these helpers thin
+- do not turn this directory into a second architecture layer

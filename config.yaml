@@ -1,10 +1,7 @@
-# Run a single inspection pass by default.
-watch: false
-
-# Poll interval when watch=true.
+# Poll interval while the interactive run loop is alive.
 sleep_seconds: 5.0
 
-# In deployment this should point to center-owned memory.
+# Use the doc root as the runtime root unless the CLI overrides this.
 memory_root: runtime-memory
 
 # The harness supervisor is expected to open a human gate only for these classes.
@@ -15,5 +12,11 @@ decision_gate_tags:
   - external_side_effect
   - goal_conflict
 
+# Run maintenance cleanup on a longer cadence when the runtime stays alive.
+cleanup_maintenance_interval_seconds: 14400
+
 # Preferred launcher for specialist agents.
 default_launcher: codex_app_server
+
+communication_host: 127.0.0.1
+communication_port: 8765

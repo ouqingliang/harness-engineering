@@ -1,13 +1,21 @@
 # Runners
 
-This directory will hold runner adapters for specialist agents.
+This directory holds the current runner surface for agents.
 
-The expected primary adapter is a Codex App Server based runner with:
+The current runner surface does a few things:
 
-- long-lived thread support
-- turn and item streaming
-- approval interception
-- artifact capture
-- durable thread persistence hooks
+- expose the local human reply page at `GET /`
+- expose the local HTTP communication surface
+- expose runtime inspection for the active supervisor scheduler
+- return communication state as UTF-8 JSON
 
-This is a future implementation carrier, not yet the completed runtime.
+Current boundaries:
+
+- `main.py run` is still the only supported way to advance the harness loop
+- the HTTP surface is for communication and inspection, not for replacing the scheduler entrypoint
+- low-level turn running remains an internal helper under `lib/runner_bridge.py`
+
+Current rule:
+
+- the runner is an adapter
+- the runner is not the architecture

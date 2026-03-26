@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "reopen",
+        "failed"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "description"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "next_hint": {
+      "type": "string"
+    },
+    "verification": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "required",
+        "commands",
+        "passed",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "mission_status": {
+      "type": "string",
+      "enum": [
+        "continue",
+        "completed",
+        "needs_human",
+        "failed"
+      ]
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "blocking": {
+            "type": "boolean"
+          },
+          "importance": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "blocking",
+          "importance",
+          "tags",
+          "context"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "status",
+    "summary",
+    "artifacts",
+    "next_hint",
+    "verification",
+    "mission_status",
+    "questions"
+  ],
+  "additionalProperties": false
+}
