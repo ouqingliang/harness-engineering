@@ -102,7 +102,15 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
     mission = runtime.get("mission", {}) if isinstance(runtime, dict) else {}
     state = runtime.get("state", {}) if isinstance(runtime, dict) else {}
     runtime_status = state.get("status") or mission.get("status") or "unknown"
-    refresh = '<meta http-equiv="refresh" content="3">' if gate or runtime_status in {"waiting_human", "running"} else ""
+    initial_monitor = {
+        "runtime_status": str(runtime_status),
+        "mission_status": str(mission.get("status") or "unknown"),
+        "round": str(state.get("current_round") or mission.get("round") or 0),
+        "active_agent": str(state.get("active_agent") or "idle"),
+        "pending_gate_id": str(state.get("pending_gate_id") or ""),
+        "gate_id": str(gate.get("id") or "") if isinstance(gate, dict) else "",
+        "gate_status": str(gate.get("status") or "") if isinstance(gate, dict) else "",
+    }
     gate_html = ""
     if gate:
         brief = _parse_gate_context(gate.get("context"))
@@ -151,8 +159,7 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    {refresh}
-    <title>Harness Human Reply</title>
+    <title>Harness Monitor</title>
     <style>
       :root {{
         color-scheme: light;
@@ -188,6 +195,28 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
       }}
       .hero {{
         margin-bottom: 1rem;
+      }}
+      .monitor {{
+        display: grid;
+        gap: 0.9rem;
+        margin-bottom: 1rem;
+      }}
+      .monitor-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+        gap: 0.75rem;
+      }}
+      .monitor-card {{
+        background: #fffdf9;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 0.9rem 1rem;
+      }}
+      .monitor-card strong {{
+        display: block;
+        font-size: 0.82rem;
+        color: var(--muted);
+        margin-bottom: 0.3rem;
       }}
       .eyebrow {{
         text-transform: uppercase;
@@ -287,6 +316,10 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         color: var(--muted);
         font-size: 0.95rem;
       }}
+      .monitor-note {{
+        color: var(--muted);
+        font-size: 0.92rem;
+      }}
     </style>
   </head>
   <body>
@@ -294,19 +327,102 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
       {notice_html}
       {error_html}
       <section class="hero">
-        <div class="eyebrow">Harness Human Reply</div>
+        <div class="eyebrow">Harness Monitor</div>
         <h1>{escape(str(mission.get("goal") or "Current harness run"))}</h1>
-        <p>This page is the human-facing inbox for the harness. When a real decision is needed, reply here and the blocked agent will continue automatically.</p>
+        <p>This page is both the live monitor and the human-facing inbox for the harness. When a real decision is needed, reply here and the blocked agent will continue automatically.</p>
         <div class="meta-row">
-          <span>Mission status: {escape(str(mission.get("status") or "unknown"))}</span>
-          <span>Runtime status: {escape(str(runtime_status))}</span>
-          <span>Round: {escape(str(state.get("current_round") or mission.get("round") or 0))}</span>
-          <span>Active agent: {escape(str(state.get("active_agent") or "idle"))}</span>
+          <span>HTTP: 127.0.0.1:{escape(str(server.server_port))}</span>
+          <span>Doc root: {escape(str(mission.get("doc_root") or ""))}</span>
         </div>
       </section>
+      <section class="hero monitor">
+        <div class="eyebrow">Live Status</div>
+        <div class="monitor-grid">
+          <div class="monitor-card"><strong>Mission</strong><span id="mission-status">{escape(str(mission.get("status") or "unknown"))}</span></div>
+          <div class="monitor-card"><strong>Runtime</strong><span id="runtime-status">{escape(str(runtime_status))}</span></div>
+          <div class="monitor-card"><strong>Round</strong><span id="runtime-round">{escape(str(state.get("current_round") or mission.get("round") or 0))}</span></div>
+          <div class="monitor-card"><strong>Active Agent</strong><span id="active-agent">{escape(str(state.get("active_agent") or "idle"))}</span></div>
+          <div class="monitor-card"><strong>Pending Gate</strong><span id="pending-gate">{escape(str(state.get("pending_gate_id") or gate.get("id") if gate else "" or "none"))}</span></div>
+        </div>
+        <p class="monitor-note" id="monitor-note">This page polls the runtime in the background. Draft replies are kept in your browser and will not disappear while you are typing.</p>
+      </section>
       {gate_html}
-      <p class="footer">This page refreshes automatically while the harness is active.</p>
+      <p class="footer">The page no longer hard-refreshes while you are typing. If the gate changes mid-draft, your text stays in place.</p>
     </main>
+    <script>
+      const INITIAL_MONITOR = {json.dumps(initial_monitor, ensure_ascii=False)};
+      const monitorNote = document.getElementById("monitor-note");
+      const messageBox = document.getElementById("message");
+      const replyForm = document.querySelector(".reply-form");
+      const gateInput = document.querySelector('input[name="gate_id"]');
+      const draftKey = () => {{
+        const gateId = gateInput ? gateInput.value : (INITIAL_MONITOR.gate_id || "no-gate");
+        return "harness-monitor-draft:" + gateId;
+      }};
+      const loadDraft = () => {{
+        if (!messageBox) return;
+        const draft = window.localStorage.getItem(draftKey());
+        if (draft && !messageBox.value) {{
+          messageBox.value = draft;
+        }}
+      }};
+      const saveDraft = () => {{
+        if (!messageBox) return;
+        window.localStorage.setItem(draftKey(), messageBox.value);
+      }};
+      if (messageBox) {{
+        loadDraft();
+        messageBox.addEventListener("input", saveDraft);
+      }}
+      if (replyForm) {{
+        replyForm.addEventListener("submit", () => {{
+          if (messageBox && messageBox.value.trim()) {{
+            window.localStorage.setItem(draftKey(), messageBox.value);
+          }}
+        }});
+      }}
+      const updateText = (id, value) => {{
+        const node = document.getElementById(id);
+        if (node) node.textContent = value;
+      }};
+      let lastGateId = INITIAL_MONITOR.gate_id || "";
+      let lastRuntimeStatus = INITIAL_MONITOR.runtime_status || "";
+      const hasDraft = () => Boolean(messageBox && messageBox.value.trim());
+      const refreshMonitor = async () => {{
+        try {{
+          const response = await fetch("/runtime", {{ cache: "no-store" }});
+          if (!response.ok) return;
+          const payload = await response.json();
+          const runtime = payload.runtime || {{}};
+          const mission = runtime.mission || {{}};
+          const state = runtime.state || {{}};
+          const communication = payload.communication || {{}};
+          const openGates = Array.isArray(communication.gates) ? communication.gates.filter((gate) => gate && gate.status === "open") : [];
+          const gate = openGates.length ? openGates[0] : null;
+          updateText("mission-status", String(mission.status || "unknown"));
+          updateText("runtime-status", String(state.status || mission.status || "unknown"));
+          updateText("runtime-round", String(state.current_round || mission.round || 0));
+          updateText("active-agent", String(state.active_agent || "idle"));
+          updateText("pending-gate", String(state.pending_gate_id || (gate && gate.id) || "none"));
+          const nextGateId = gate ? String(gate.id || "") : "";
+          const nextRuntimeStatus = String(state.status || mission.status || "unknown");
+          const gateChanged = nextGateId !== lastGateId;
+          const statusChanged = nextRuntimeStatus !== lastRuntimeStatus;
+          if (gateChanged || statusChanged) {{
+            if (hasDraft()) {{
+              monitorNote.textContent = "Runtime changed while you were typing. Your draft is kept locally. Submit it, or reload when you are ready.";
+            }} else {{
+              window.location.reload();
+              return;
+            }}
+          }}
+          lastGateId = nextGateId;
+          lastRuntimeStatus = nextRuntimeStatus;
+        }} catch (_error) {{
+        }}
+      }};
+      window.setInterval(refreshMonitor, 3000);
+    </script>
   </body>
 </html>"""
 

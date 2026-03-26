@@ -166,7 +166,8 @@ class CommunicationServerTests(unittest.TestCase):
 
                 status, body, _ = _request_text(port, "GET", "/")
                 self.assertEqual(status, 200)
-                self.assertIn("Harness Human Reply", body)
+                self.assertIn("Harness Monitor", body)
+                self.assertIn("Draft replies are kept in your browser", body)
                 self.assertIn("Need decision", body)
                 self.assertIn("Approve the mainline?", body)
 
