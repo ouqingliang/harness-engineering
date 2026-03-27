@@ -31,6 +31,7 @@ Build and maintain the harness that lets AI workers continue meaningful software
 
 ## Working Rules
 
+- DO NOT FORGET: use subagent to finish complicated jobs
 - keep the runtime simple
 - keep all runtime roles under `agents/`
 - keep role boundaries sharp
@@ -40,7 +41,6 @@ Build and maintain the harness that lets AI workers continue meaningful software
 - let `supervisor` answer ordinary blockers first
 - keep active runtime state under `.harness/`
 - require real verification before closing work
-- use subagent to complete your jobs.
 
 ## Decision Gates
 

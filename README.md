@@ -1,27 +1,28 @@
 # Harness Engineering
 
-This directory is the home of the repository's Harness Engineering runtime.
+This directory contains the harness runtime for the repository.
 
-Here, `Harness` means the execution shell around a small set of agents.
-It is the part that keeps the loop running.
+`Harness` means the execution shell around a small set of agents. Its job is to keep the loop moving without turning routine blockers into human work.
 
 ## Purpose
 
-Harness Engineering exists to solve a different problem from the product code under `src/center/`, `src/client/`, and `src/engineer/`.
+Harness Engineering exists to answer a different question from the product code under `src/center/`, `src/client/`, and `src/engineer/`.
 
-- product code answers: how the product behaves
-- harness code answers: how agents keep working for a long time without constantly stopping to ask the human
+- product code answers how the product behaves
+- harness code answers how agents keep working over time without constant human interruption
 
 The harness is responsible for:
 
 - deciding which agent runs next
-- passing a small handoff to that agent
+- routing `audit` back through `supervisor`
+- passing compact handoffs to agents
 - recording enough runtime state to resume after failure or restart
 - handling ordinary blockers automatically
-- sending only real decision gates to the human
+- sending only explicit decision gates to the human
+- managing git worktrees for every document- or code-mutating agent
 - refusing to mark work done before the required verification has actually passed
-- recording important frozen architecture facts in durable docs the harness can re-read
-- scheduling cleanup both at round boundaries and on a longer maintenance cadence
+- recording frozen architecture facts in durable docs the harness can re-read
+- scheduling cleanup at round boundaries and on a longer maintenance cadence
 
 It is not responsible for:
 
@@ -78,7 +79,7 @@ Current commands:
 - `python main.py inspect`
   - print the local agent topology
 - `python main.py run --doc-root <path>`
-  - load the UTF-8 planning/design docs under `<path>`
+  - load the UTF-8 planning and design docs under `<path>`
   - initialize `<memory_root>/.harness/`
   - start or resume the long-running supervisor loop
   - auto-answer ordinary blockers
@@ -90,16 +91,23 @@ Current commands:
 
 ## Target Runtime Shape
 
-The approved target runtime is supervisor-centered, not a fixed pipeline.
+The target runtime is supervisor-centered, not a fixed pipeline.
 
-- `supervisor` owns the state machine and is the only component allowed to decide whether the human is needed
-- `design`, `execution`, and `audit` form the main work loop
-- `communication` is a side-channel used only after `supervisor` opens a decision brief
+- `supervisor` is the only scheduler
+- `design`, `execution`, and `audit` are all meant to be background-capable agents
+- `audit` reports to `supervisor`, and `supervisor` decides whether to replan, retry, or accept
+- `communication` is a side-channel used only after `supervisor` opens an explicit decision gate
 - `cleanup` runs in three modes: round-close, recovery, and periodic maintenance
+- every document- or code-mutating agent must work in a supervisor-managed worktree
 
-The current code now follows this runtime shape.
-The main remaining gap is that much of the role behavior still lives inside `lib/scheduler.py`.
-Treat the architecture doc under [memory/doc/harness-architecture.md](/C:/Users/oql/OneDrive/Study/AIMA-refactor/harness-engineering/memory/doc/harness-architecture.md) as the source of truth for the intended boundary.
+The current implementation now uses that shape as the mainline runtime.
+
+- `design`, `execution`, and `audit` all run through background launcher and polling paths
+- `audit` reports verdicts back to `supervisor`, and `supervisor` decides whether to retry, replan, or accept
+- document- and code-mutating agents run inside supervisor-managed worktrees
+- human interaction stays behind explicit supervisor gates
+
+Treat [memory/doc/harness-architecture.md](/C:/Users/oql/OneDrive/Study/AIMA-refactor/harness-engineering/memory/doc/harness-architecture.md) as the source of truth for the intended boundary.
 
 ## Runtime State
 
@@ -185,7 +193,7 @@ Run the harness from a project doc root:
 python main.py run --doc-root path/to/project/docs --memory-root runtime-memory --reset
 ```
 
-This command now does the human-facing behavior by default:
+This command starts the human-facing behavior by default:
 
 - it starts the local human reply page
 - it prints the local URL
@@ -235,8 +243,19 @@ The runtime now includes:
 - one built-in low-level turn runner under `lib/runner_bridge.py`
 - one supervisor-facing bridge under `lib/supervisor_bridge.py`
 - one human-facing communication surface through `lib/communication_api.py` and `runners/codex_app_server.py`
-- one execution path that calls `codex exec` inside the target project root, with a prompt that explicitly tells the execution worker to use subagents for modification work
+- one shared background-agent launcher path for `design`, `execution`, and `audit`
 - one multi-round work loop where accepted slices flow back into `design` until the selected planning doc has no remaining slices
 
-The current implementation still keeps the runtime deliberately thin.
-It does not add a larger protocol layer or a second architecture stack around the loop.
+The current implementation now supports:
+
+- non-blocking `design`, `execution`, and `audit`
+- supervisor-managed worktrees for mutating agents
+- supervisor-routed audit verdicts and retry or replan decisions
+- human escalation only through explicit gates
+
+Current working model:
+
+- `supervisor` owns the canonical repository checkout and the state machine
+- modifying agents work inside supervisor-assigned git worktrees
+- `audit` reports findings back to `supervisor` first
+- `supervisor` then decides whether to reopen `execution` or send the slice back through `design`

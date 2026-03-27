@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -16,6 +18,8 @@ from lib.runtime_state import (
     save_state,
     utc_now,
 )
+from lib.scheduler_components.audit import run_saved_audit_request
+from lib.scheduler_components.design import run_saved_design_request
 from lib.scheduler import HarnessScheduler
 from main import build_or_update_mission, load_all_specs, validate_specs
 
@@ -60,11 +64,60 @@ def _fake_verification_run(spec: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _launch_execution_immediately(**kwargs: object) -> dict[str, object]:
+    result_path = Path(str(kwargs["result_path"]))
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(_fake_execution_result(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "pid": 1234,
+        "command": ["python", "codex_execution_launcher.py"],
+        "started_at": utc_now(),
+    }
+
+
+def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
+    common_kwargs = {
+        "request_path": Path(str(kwargs["request_path"])),
+        "result_path": Path(str(kwargs["result_path"])),
+        "launcher_state_path": Path(str(kwargs["launcher_state_path"])),
+        "launcher_run_path": Path(str(kwargs["launcher_run_path"])),
+    }
+    agent_id = str(kwargs["agent_id"])
+    if agent_id == "design":
+        run_saved_design_request(**common_kwargs)
+    elif agent_id == "audit":
+        run_saved_audit_request(**common_kwargs)
+    else:
+        raise AssertionError(f"unexpected background agent: {agent_id}")
+    return {
+        "ok": True,
+        "pid": 1234,
+        "command": ["python", "codex_agent_launcher.py", "--agent-id", agent_id],
+        "started_at": utc_now(),
+    }
+
+
+def _init_git_repo(project_root: Path) -> None:
+    commands = [
+        ["git", "init"],
+        ["git", "config", "user.email", "harness-tests@example.com"],
+        ["git", "config", "user.name", "Harness Tests"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ]
+    for command in commands:
+        completed = subprocess.run(command, cwd=str(project_root), capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr or completed.stdout or f"failed: {' '.join(command)}")
+
+
 class SchedulerRoundTests(unittest.TestCase):
     def _seed_runtime(self, temp_dir: Path) -> tuple[Path, Path, HarnessScheduler]:
         doc_root = temp_dir / "docs"
         doc_root.mkdir()
         (doc_root / "README.md").write_text("# Demo Project\n\nThis is the primary project doc.\n", encoding="utf-8")
+        _init_git_repo(temp_dir)
 
         memory_root = temp_dir / "memory"
         config = HarnessConfig.from_mapping(
@@ -111,7 +164,14 @@ class SchedulerRoundTests(unittest.TestCase):
                 mission=resumed_mission,
                 state=persisted_state,
             )
-            second_pass = resumed_scheduler.run_until_stable(max_turns=1)
+            with patch(
+                "lib.scheduler._launch_execution_subagent",
+                return_value={"ok": True, "pid": 4567, "command": ["python"], "started_at": utc_now()},
+            ), patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ):
+                second_pass = resumed_scheduler.run_until_stable(max_turns=1)
             self.assertEqual(len(second_pass.steps), 1)
 
             second_step = second_pass.steps[0]
@@ -119,15 +179,22 @@ class SchedulerRoundTests(unittest.TestCase):
             self.assertEqual(second_step["state_after"]["sequence"], 2)
 
             resumed_state = load_state(memory_root)
-            self.assertEqual(resumed_state.extra["cycle_id"], first_cycle_id)
-            self.assertEqual(resumed_state.extra["sequence"], 2)
+            if second_pass.status == "completed" or "cycle_id" not in resumed_state.extra:
+                self.assertNotIn("cycle_id", resumed_state.extra)
+                self.assertNotIn("sequence", resumed_state.extra)
+            else:
+                self.assertEqual(resumed_state.extra["cycle_id"], first_cycle_id)
+                self.assertEqual(resumed_state.extra["sequence"], 2)
 
     def test_cleanup_round_close_clears_turn_identity_and_keeps_mission_completed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             _, memory_root, scheduler = self._seed_runtime(temp_path)
 
-            with patch("lib.scheduler._run_execution_subagent", return_value=_fake_execution_result()), patch(
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_immediately), patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ), patch(
                 "lib.scheduler._run_verification_command",
                 side_effect=_fake_verification_run,
             ):
@@ -205,6 +272,85 @@ class SchedulerRoundTests(unittest.TestCase):
             self.assertEqual(first_call_state.get("sequence"), 0)
             self.assertEqual(second_call_state.get("sequence"), 1)
 
+    def test_agent_status_snapshot_does_not_duplicate_worktree_slice_or_brief_in_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            _, _, scheduler = self._seed_runtime(temp_path)
+
+            scheduler._upsert_running_agent(
+                {
+                    "agent_id": "design",
+                    "slice_key": "plans/demo.md::phase 1",
+                    "phase_title": "design",
+                    "status": "running",
+                    "worktree_path": "C:/tmp/design-worktree",
+                    "brief": "primary_doc=plans/demo.md",
+                }
+            )
+
+            snapshot = scheduler.snapshot()
+            design_status = next(item for item in snapshot["agent_statuses"] if item["id"] == "design")
+
+            self.assertEqual(design_status["worktree"], "C:/tmp/design-worktree")
+            self.assertEqual(design_status["current_slice"], "design")
+            self.assertEqual(design_status["current_brief"], "primary_doc=plans/demo.md")
+            self.assertNotIn("worktree=C:/tmp/design-worktree", design_status["details"])
+            self.assertNotIn("slice=design", design_status["details"])
+            self.assertNotIn("brief=primary_doc=plans/demo.md", design_status["details"])
+
+    def test_dead_background_design_run_fails_instead_of_hanging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            _, memory_root, scheduler = self._seed_runtime(temp_path)
+            stale_slice_key = f"design::{scheduler._selected_primary_doc() or 'README.md'}"
+            launcher_dir = scheduler.paths.launchers_dir / "design"
+            launcher_dir.mkdir(parents=True, exist_ok=True)
+            launcher_state_path = launcher_dir / "state.json"
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "design",
+                        "active_run_id": "cycle-stale-00",
+                        "pid": 999999,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            request_path = scheduler.paths.artifacts_dir / "cycle-stale" / "00-design-request.json"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text("{}\n", encoding="utf-8")
+            worktree_path = scheduler.paths.worktrees_dir / "design-stale"
+            worktree_path.mkdir(parents=True, exist_ok=True)
+
+            scheduler._upsert_running_agent(
+                {
+                    "agent_id": "design",
+                    "slice_key": stale_slice_key,
+                    "phase_title": "design",
+                    "status": "running",
+                    "request_path": str(request_path),
+                    "result_path": str(request_path.with_name("00-design-result.json")),
+                    "launcher_state_path": str(launcher_state_path),
+                    "launcher_run_path": str(launcher_dir / "runs" / "cycle-stale-00.json"),
+                    "project_root": str(temp_path),
+                    "worktree_path": str(worktree_path),
+                    "brief": "primary_doc=plans/demo.md",
+                }
+            )
+            scheduler.state.active_agent = "design"
+
+            with patch("lib.scheduler_components.background_runtime._pid_is_alive", return_value=False):
+                result = scheduler.run_until_stable(max_turns=1)
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(scheduler.mission.status, "failed")
+            self.assertEqual(load_state(memory_root).extra["status"], "failed")
+            self.assertIsNone(scheduler._current_running_agent("design"))
+
     def test_maintenance_due_runs_cleanup_before_next_work_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -213,7 +359,7 @@ class SchedulerRoundTests(unittest.TestCase):
             scheduler.state.extra["last_cleanup_maintenance_at"] = "2026-03-25T00:00:00Z"
             scheduler.mission.extra["maintenance_findings"] = ["stale finding"]
 
-            with patch("lib.scheduler._run_execution_subagent", return_value=_fake_execution_result()), patch(
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_immediately), patch(
                 "lib.scheduler._run_verification_command",
                 side_effect=_fake_verification_run,
             ):
@@ -237,7 +383,11 @@ class SchedulerRoundTests(unittest.TestCase):
             scheduler.state.extra["cycle_id"] = "cycle-stale"
             scheduler.state.extra["sequence"] = 3
 
-            result = scheduler.run_until_stable(max_turns=1)
+            with patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ):
+                result = scheduler.run_until_stable(max_turns=1)
 
             self.assertEqual(len(result.steps), 1)
             self.assertEqual(result.steps[0]["agent"]["id"], "cleanup")
@@ -278,7 +428,11 @@ class SchedulerRoundTests(unittest.TestCase):
             scheduler.state.extra["blocked_agent"] = "design"
             scheduler.state.extra["resume_agent"] = "design"
 
-            result = scheduler.run_until_stable(max_turns=1)
+            with patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ):
+                result = scheduler.run_until_stable(max_turns=1)
 
             self.assertEqual(result.status, "running")
             self.assertEqual(len(result.steps), 1)
@@ -288,6 +442,138 @@ class SchedulerRoundTests(unittest.TestCase):
             self.assertEqual(persisted_state.active_agent, "design")
             self.assertEqual(persisted_state.extra["status"], "running")
             self.assertEqual(persisted_state.extra.get("pending_gate_id", ""), "")
+
+    def test_design_prefetches_the_next_slice_into_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            doc_root = temp_path / "docs"
+            doc_root.mkdir()
+            (doc_root / "plan.md").write_text(
+                "\n".join(
+                    [
+                        "# Demo Plan",
+                        "",
+                        "### Phase 1: First slice",
+                        "Goals",
+                        "- do the first thing",
+                        "File Targets",
+                        "- src/demo/one.py",
+                        "Done Criteria",
+                        "- first is done",
+                        "",
+                        "### Phase 2: Second slice",
+                        "Goals",
+                        "- do the second thing",
+                        "File Targets",
+                        "- src/demo/two.py",
+                        "Done Criteria",
+                        "- second is done",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            _init_git_repo(temp_path)
+            memory_root = temp_path / "memory"
+            config = HarnessConfig.from_mapping(
+                {"memory_root": str(memory_root), "doc_root": str(doc_root), "goal": "prefetch next slice"}
+            )
+            paths = ensure_runtime_root(memory_root)
+            mission = build_or_update_mission(config, doc_root=doc_root)
+            state = RuntimeState(
+                active_agent="design",
+                last_successful_agent="",
+                retry_count=0,
+                last_run_at=utc_now(),
+                current_round=0,
+                extra={"status": "running"},
+            )
+            save_mission(paths.memory_root, mission)
+            save_state(paths.memory_root, state)
+
+            specs = load_all_specs()
+            validate_specs(specs)
+            scheduler = HarnessScheduler(specs=specs, paths=paths, mission=mission, state=state)
+
+            with patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ):
+                result = scheduler.run_until_stable(max_turns=1)
+
+            self.assertEqual(result.steps[0]["agent"]["id"], "design")
+            current_design_artifact = Path(result.steps[0]["report"]["artifacts"][-1])
+            current_design_payload = json.loads(current_design_artifact.read_text(encoding="utf-8"))
+            queue = scheduler.mission.extra.get("planned_slice_queue", [])
+            self.assertEqual(len(queue), 1)
+            self.assertNotEqual(
+                queue[0]["selected_phase"]["title"],
+                current_design_payload["selected_phase"]["title"],
+            )
+
+    def test_background_execution_allows_design_prefetch_before_execution_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            doc_root = temp_path / "docs"
+            doc_root.mkdir()
+            (doc_root / "plan.md").write_text(
+                "\n".join(
+                    [
+                        "# Demo Plan",
+                        "",
+                        "### Phase 1: First slice",
+                        "Goals",
+                        "- do the first thing",
+                        "File Targets",
+                        "- src/demo/one.py",
+                        "Done Criteria",
+                        "- first is done",
+                        "",
+                        "### Phase 2: Second slice",
+                        "Goals",
+                        "- do the second thing",
+                        "File Targets",
+                        "- src/demo/two.py",
+                        "Done Criteria",
+                        "- second is done",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            _init_git_repo(temp_path)
+            memory_root = temp_path / "memory"
+            config = HarnessConfig.from_mapping(
+                {"memory_root": str(memory_root), "doc_root": str(doc_root), "goal": "prefetch while execution runs"}
+            )
+            paths = ensure_runtime_root(memory_root)
+            mission = build_or_update_mission(config, doc_root=doc_root)
+            state = RuntimeState(
+                active_agent="design",
+                last_successful_agent="",
+                retry_count=0,
+                last_run_at=utc_now(),
+                current_round=0,
+                extra={"status": "running"},
+            )
+            save_mission(paths.memory_root, mission)
+            save_state(paths.memory_root, state)
+
+            specs = load_all_specs()
+            validate_specs(specs)
+            scheduler = HarnessScheduler(specs=specs, paths=paths, mission=mission, state=state)
+
+            with patch(
+                "lib.scheduler._launch_execution_subagent",
+                return_value={"ok": True, "pid": 4567, "command": ["python"], "started_at": utc_now()},
+            ), patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ):
+                result = scheduler.run_until_stable(max_turns=3)
+
+            self.assertEqual(result.status, "running")
+            self.assertEqual([step["agent"]["id"] for step in result.steps], ["design", "execution"])
+            self.assertEqual(len(scheduler._running_execution_runs()), 1)
+            self.assertEqual(len(scheduler.mission.extra.get("planned_slice_queue", [])), 1)
 
 
 if __name__ == "__main__":

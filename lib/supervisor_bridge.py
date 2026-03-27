@@ -34,9 +34,6 @@ class SupervisorBridge:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            return {
-                "runtime_root": str(self.scheduler.paths.harness_root),
-                "mission": self.scheduler.mission.to_mapping(),
-                "state": self.scheduler.state.to_mapping(),
-                "agents": [_spec_mapping(spec) for spec in self.scheduler.specs],
-            }
+            payload = self.scheduler.snapshot()
+            payload["agents"] = [_spec_mapping(spec) for spec in self.scheduler.specs]
+            return payload

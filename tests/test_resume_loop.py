@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from lib.communication_api import CommunicationStore
 from lib.runtime_state import HarnessConfig, RuntimeState, ensure_runtime_root, save_mission, save_state, utc_now
+from lib.scheduler_components.audit import run_saved_audit_request
+from lib.scheduler_components.design import run_saved_design_request
 from lib.scheduler import HarnessScheduler
 from main import build_or_update_mission, load_all_specs, validate_specs
 
@@ -51,6 +55,54 @@ def _fake_verification_run(spec: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _launch_execution_immediately(**kwargs: object) -> dict[str, object]:
+    result_path = Path(str(kwargs["result_path"]))
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(_fake_execution_result(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "pid": 1234,
+        "command": ["python", "codex_execution_launcher.py"],
+        "started_at": utc_now(),
+    }
+
+
+def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
+    common_kwargs = {
+        "request_path": Path(str(kwargs["request_path"])),
+        "result_path": Path(str(kwargs["result_path"])),
+        "launcher_state_path": Path(str(kwargs["launcher_state_path"])),
+        "launcher_run_path": Path(str(kwargs["launcher_run_path"])),
+    }
+    agent_id = str(kwargs["agent_id"])
+    if agent_id == "design":
+        run_saved_design_request(**common_kwargs)
+    elif agent_id == "audit":
+        run_saved_audit_request(**common_kwargs)
+    else:
+        raise AssertionError(f"unexpected background agent: {agent_id}")
+    return {
+        "ok": True,
+        "pid": 1234,
+        "command": ["python", "codex_agent_launcher.py", "--agent-id", agent_id],
+        "started_at": utc_now(),
+    }
+
+
+def _init_git_repo(project_root: Path) -> None:
+    commands = [
+        ["git", "init"],
+        ["git", "config", "user.email", "harness-tests@example.com"],
+        ["git", "config", "user.name", "Harness Tests"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "init"],
+    ]
+    for command in commands:
+        completed = subprocess.run(command, cwd=str(project_root), capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr or completed.stdout or f"failed: {' '.join(command)}")
+
+
 class ResumeLoopTests(unittest.TestCase):
     def test_gate_waits_for_human_and_resumes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -61,6 +113,7 @@ class ResumeLoopTests(unittest.TestCase):
                 "# Demo Project\n\nOverall planning.\n\n[decision-gate] Confirm the architecture change before continuing.\n",
                 encoding="utf-8",
             )
+            _init_git_repo(root)
 
             memory_root = root / "memory"
             config = HarnessConfig.from_mapping(
@@ -90,7 +143,10 @@ class ResumeLoopTests(unittest.TestCase):
             store = CommunicationStore(paths.harness_root)
             store.reply_to_gate(first_pass.pending_gate_id or "", sender="human", body="Continue the mainline implementation.")
 
-            with patch("lib.scheduler._run_execution_subagent", return_value=_fake_execution_result()), patch(
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_immediately), patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ), patch(
                 "lib.scheduler._run_verification_command",
                 side_effect=_fake_verification_run,
             ):

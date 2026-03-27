@@ -5,10 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
-import shlex
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import uuid
@@ -16,7 +13,7 @@ import uuid
 from .auto_answer import answer_question
 from .communication_api import CommunicationStore
 from .documents import build_doc_bundle
-from .project_context import path_within, project_root_from_doc_root, same_path
+from .project_context import project_root_from_doc_root, same_path
 from .question_router import Question, route_question, save_answer, save_question
 from .runtime_state import (
     Mission,
@@ -30,55 +27,35 @@ from .runtime_state import (
     utc_now,
 )
 from .runner_bridge import RunnerBridge, RunnerTurn
+from .scheduler_components import (
+    _launch_execution_subagent,
+    DEFAULT_EXECUTION_OUTPUT,
+    HARNESS_ROOT,
+    _command_display,
+    _normalize_text_list,
+    _run_verification_command,
+    _verification_acceptance_from_runs,
+    _verification_expectation_from_text,
+    _verification_scope_findings,
+    _verification_specs,
+    _write_json,
+    execute_turn as _execute_scheduler_turn,
+)
+from .worktree import (
+    WorktreeError,
+    ensure_supervised_worktree,
+    promote_worktree_to_project_root,
+    remove_supervised_worktree,
+    worktree_common_dir,
+)
 
 
 DEFAULT_CLEANUP_MAINTENANCE_INTERVAL_SECONDS = 4 * 60 * 60
-HARNESS_ROOT = Path(__file__).resolve().parents[1]
-CODEX_EXECUTABLE_NAMES = ("codex.cmd", "codex.exe", "codex")
 ARCHITECTURE_BASELINE_DOCS = (
     "designs/2026-03-25-task-centered-autonomous-ops-platform.md",
     "designs/2026-03-25-harness-engineering-integration.md",
     "designs/2026-03-25-center-subsystem-architecture-outline.md",
     "plans/2026-03-25-task-mainline-and-engineernode-removal.md",
-)
-DEFAULT_EXECUTION_OUTPUT = {
-    "status": "unknown",
-    "summary": "",
-    "changed_paths": [],
-    "verification_notes": [],
-    "needs_human": False,
-    "human_question": "",
-    "why_not_auto_answered": "",
-    "required_reply_shape": "",
-    "decision_tags": [],
-    "options": [],
-    "notes": [],
-}
-SUPERVISOR_DECISION_NEGATION_HINTS = (
-    "ignore",
-    "exclude",
-    "separate",
-    "not block",
-    "not a blocker",
-    "unless",
-    "only if related",
-    "split out",
-    "defer",
-    "temporary non-blocker",
-    "fen li",
-    "bu zu sai",
-    "ji you shi bai",
-    "xiang guan",
-    "wu guan",
-    "分离",
-    "不阻塞",
-    "不是 blocker",
-    "不是blocker",
-    "除非",
-    "仅在",
-    "只有在",
-    "无关",
-    "既有失败",
 )
 
 
@@ -114,259 +91,10 @@ def _spec_mapping(spec: Any) -> dict[str, Any]:
     }
 
 
-def _write_json(path: Path, payload: Mapping[str, Any]) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return str(path)
-
-
-def _command_display(command: Sequence[str]) -> str:
-    return " ".join(command)
-
-
-def _harness_default_verification_command() -> list[str]:
-    return [sys.executable, "-m", "unittest", "tests.test_runtime_files", "-v"]
-
-
-def _normalize_verification_command(candidate: Any) -> list[str]:
-    if isinstance(candidate, str):
-        return shlex.split(candidate, posix=sys.platform != "win32")
-    if isinstance(candidate, Sequence) and not isinstance(candidate, (bytes, bytearray, str)):
-        return [str(item) for item in candidate if str(item)]
-    if isinstance(candidate, Mapping):
-        raw_command = candidate.get("command", candidate.get("argv", []))
-        return _normalize_verification_command(raw_command)
-    return []
-
-
-def _normalize_env_mapping(candidate: Any) -> dict[str, str]:
-    if not isinstance(candidate, Mapping):
-        return {}
-    return {
-        coerce_str(key).strip(): coerce_str(value)
-        for key, value in candidate.items()
-        if coerce_str(key).strip()
-    }
-
-
-def _resolve_cwd(candidate: Any, *, project_root: Path, default_cwd: Path) -> Path:
-    raw = coerce_str(candidate).strip()
-    if not raw:
-        return default_cwd
-    path = Path(raw)
-    if not path.is_absolute():
-        path = project_root / path
-    return path.resolve()
-
-
-def _generic_external_verification_spec(*, project_root: Path, doc_root: Path) -> dict[str, Any]:
-    command = [
-        sys.executable,
-        "-c",
-        (
-            "from pathlib import Path; import sys; "
-            "project = Path(sys.argv[1]); doc = Path(sys.argv[2]); "
-            "assert project.exists(), project; assert doc.exists(), doc; "
-            "print(project); print(doc)"
-        ),
-        str(project_root),
-        str(doc_root),
-    ]
-    return {
-        "command": command,
-        "command_display": _command_display(command),
-        "cwd": str(project_root),
-        "env": {},
-        "source": "generic_external_default",
-    }
-
-
-def _default_verification_specs(*, project_root: Path, doc_root: Path) -> list[dict[str, Any]]:
-    if same_path(project_root, HARNESS_ROOT):
-        command = _harness_default_verification_command()
-        return [
-            {
-                "command": command,
-                "command_display": _command_display(command),
-                "cwd": str(HARNESS_ROOT),
-                "env": {},
-                "source": "harness_default",
-            }
-        ]
-    return [_generic_external_verification_spec(project_root=project_root, doc_root=doc_root)]
-
-
-def _parse_shell_verification_spec(raw_command: str, *, project_root: Path, default_cwd: Path) -> dict[str, Any] | None:
-    command_text = raw_command.strip()
-    if not command_text:
-        return None
-    if command_text.startswith("(") and command_text.endswith(")"):
-        command_text = command_text[1:-1].strip()
-    cwd = default_cwd
-    env: dict[str, str] = {}
-    command: list[str] = []
-    for segment in [item.strip() for item in command_text.split("&&") if item.strip()]:
-        tokens = shlex.split(segment, posix=True)
-        if not tokens:
-            continue
-        if tokens[0] == "cd" and len(tokens) >= 2:
-            cwd = _resolve_cwd(tokens[1], project_root=project_root, default_cwd=default_cwd)
-            continue
-        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", tokens[0]):
-            key, value = tokens.pop(0).split("=", 1)
-            env[key] = value
-        if tokens:
-            command = [str(item) for item in tokens]
-    if not command:
-        return None
-    return {
-        "command": command,
-        "command_display": command_text,
-        "cwd": str(cwd),
-        "env": env,
-        "source": "shell_text",
-    }
-
-
-def _normalize_verification_spec(
-    candidate: Any,
-    *,
-    project_root: Path,
-    default_cwd: Path,
-) -> dict[str, Any] | None:
-    if isinstance(candidate, Mapping):
-        command = _normalize_verification_command(candidate)
-        if not command and candidate.get("raw"):
-            return _parse_shell_verification_spec(
-                coerce_str(candidate.get("raw")),
-                project_root=project_root,
-                default_cwd=default_cwd,
-            )
-        if not command:
-            return None
-        cwd = _resolve_cwd(candidate.get("cwd"), project_root=project_root, default_cwd=default_cwd)
-        env = _normalize_env_mapping(candidate.get("env"))
-        return {
-            "command": command,
-            "command_display": coerce_str(candidate.get("command_display")).strip() or _command_display(command),
-            "cwd": str(cwd),
-            "env": env,
-            "source": coerce_str(candidate.get("source")).strip() or "mapping",
-        }
-    if isinstance(candidate, str):
-        parsed = _parse_shell_verification_spec(candidate, project_root=project_root, default_cwd=default_cwd)
-        if parsed is not None:
-            return parsed
-    command = _normalize_verification_command(candidate)
-    if not command:
-        return None
-    return {
-        "command": command,
-        "command_display": _command_display(command),
-        "cwd": str(default_cwd),
-        "env": {},
-        "source": "argv",
-    }
-
-
-def _verification_specs(
-    design_contract: Mapping[str, Any],
-    *,
-    project_root: Path,
-    doc_root: Path,
-) -> list[dict[str, Any]]:
-    if os.environ.get("HARNESS_VERIFICATION_SUBPROCESS"):
-        return _default_verification_specs(project_root=HARNESS_ROOT, doc_root=HARNESS_ROOT)
-
-    raw_expectation = design_contract.get("verification_expectation", [])
-    if isinstance(raw_expectation, (str, bytes, bytearray)):
-        candidates: Sequence[Any] = [raw_expectation]
-    elif isinstance(raw_expectation, Sequence):
-        candidates = raw_expectation
-    else:
-        candidates = []
-
-    default_cwd = _resolve_cwd(design_contract.get("project_root"), project_root=project_root, default_cwd=project_root)
-    specs = [
-        _normalize_verification_spec(candidate, project_root=project_root, default_cwd=default_cwd)
-        for candidate in candidates
-    ]
-    normalized_specs = [spec for spec in specs if spec]
-    if normalized_specs:
-        return normalized_specs
-    return _default_verification_specs(project_root=project_root, doc_root=doc_root)
-
-
-def _run_verification_command(spec: Mapping[str, Any]) -> dict[str, Any]:
-    command = [str(item) for item in spec.get("command", [])]
-    cwd = Path(coerce_str(spec.get("cwd"))).resolve()
-    env_overrides = _normalize_env_mapping(spec.get("env"))
-    started_at = utc_now()
-    try:
-        child_env = dict(os.environ)
-        child_env["HARNESS_VERIFICATION_SUBPROCESS"] = "1"
-        child_env.update(env_overrides)
-        completed = subprocess.run(
-            command,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
-            env=child_env,
-        )
-        returncode = completed.returncode
-        stdout = completed.stdout
-        stderr = completed.stderr
-    except Exception as exc:  # pragma: no cover - defensive, recorded in artifact
-        returncode = -1
-        stdout = ""
-        stderr = f"{exc.__class__.__name__}: {exc}"
-    return {
-        "command": command,
-        "command_display": coerce_str(spec.get("command_display")).strip() or _command_display(command),
-        "cwd": str(cwd),
-        "env": env_overrides,
-        "source": coerce_str(spec.get("source")).strip(),
-        "started_at": started_at,
-        "completed_at": utc_now(),
-        "returncode": returncode,
-        "stdout": stdout,
-        "stderr": stderr,
-    }
-
-
 def _count_sequence_items(value: Any) -> int:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return len(value)
     return 0
-
-
-def _verification_acceptance_from_runs(
-    runs: Sequence[Mapping[str, Any]],
-    *,
-    expected_count: int = 0,
-) -> tuple[bool, list[str]]:
-    findings: list[str] = []
-    if not runs:
-        return False, ["Execution did not record any verification runs."]
-
-    if expected_count and len(runs) < expected_count:
-        findings.append(
-            f"Execution recorded {len(runs)} verification run(s) but expected {expected_count}."
-        )
-
-    for run in runs:
-        command = run.get("command_display") or run.get("command") or []
-        returncode = run.get("returncode")
-        if returncode != 0:
-            findings.append(f"Verification command {command!r} returned {returncode}.")
-
-    return not findings, findings
-
-
 def _parse_utc(text: Any) -> datetime | None:
     raw = coerce_str(text).strip()
     if not raw:
@@ -376,13 +104,6 @@ def _parse_utc(text: Any) -> datetime | None:
         return datetime.fromisoformat(normalized).astimezone(timezone.utc)
     except ValueError:
         return None
-
-
-def _normalize_text_list(value: Any) -> list[str]:
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [coerce_str(item).strip() for item in value if coerce_str(item).strip()]
-    text = coerce_str(value).strip()
-    return [text] if text else []
 
 
 def _normalize_option_items(value: Any) -> list[dict[str, str]]:
@@ -638,16 +359,6 @@ def _contract_for_supervisor_decision(
     return contract
 
 
-def _is_blocker_slice(design_contract: Mapping[str, Any]) -> bool:
-    if coerce_bool(design_contract.get("is_blocker_slice"), False):
-        return True
-    selected_phase = design_contract.get("selected_phase", {})
-    if not isinstance(selected_phase, Mapping):
-        selected_phase = {}
-    title = coerce_str(selected_phase.get("title")).strip().lower()
-    return title.startswith("blocker slice:")
-
-
 def _available_doc_paths(doc_bundle: Mapping[str, Any]) -> list[str]:
     docs = doc_bundle.get("docs", [])
     if not isinstance(docs, list):
@@ -841,336 +552,6 @@ def _select_active_phase(
     return ranked[0]
 
 
-def _verification_section(text: str) -> str:
-    match = re.search(r"^##\s+Verification\b", text, flags=re.MULTILINE)
-    if not match:
-        return ""
-    tail = text[match.end() :]
-    next_section = re.search(r"^##\s+", tail, flags=re.MULTILINE)
-    if next_section:
-        tail = tail[: next_section.start()]
-    return tail
-
-
-def _verification_expectation_from_text(text: str, *, project_root: Path, doc_root: Path) -> list[dict[str, Any]]:
-    section = _verification_section(text)
-    if not section:
-        return _default_verification_specs(project_root=project_root, doc_root=doc_root)
-    blocks = re.findall(r"```(?:bash|sh|shell)?\s*(.*?)```", section, flags=re.DOTALL | re.IGNORECASE)
-    specs: list[dict[str, Any]] = []
-    for block in blocks:
-        for raw_line in block.splitlines():
-            command_text = raw_line.strip()
-            if not command_text:
-                continue
-            parsed = _parse_shell_verification_spec(
-                command_text,
-                project_root=project_root,
-                default_cwd=project_root,
-            )
-            if parsed is not None:
-                specs.append(parsed)
-    return specs or _default_verification_specs(project_root=project_root, doc_root=doc_root)
-
-
-def _find_codex_executable() -> str:
-    for name in CODEX_EXECUTABLE_NAMES:
-        resolved = shutil.which(name)
-        if resolved:
-            return resolved
-    return ""
-
-
-def _git_status_snapshot(project_root: Path) -> dict[str, Any]:
-    command = ["git", "status", "--short"]
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        return {
-            "ok": False,
-            "command": command,
-            "cwd": str(project_root),
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"{exc.__class__.__name__}: {exc}",
-            "entries": [],
-        }
-    entries = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    return {
-        "ok": completed.returncode == 0,
-        "command": command,
-        "cwd": str(project_root),
-        "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-        "entries": entries,
-    }
-
-
-def _execution_output_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "status": {"type": "string"},
-            "summary": {"type": "string"},
-            "changed_paths": {"type": "array", "items": {"type": "string"}},
-            "verification_notes": {"type": "array", "items": {"type": "string"}},
-            "needs_human": {"type": "boolean"},
-            "human_question": {"type": "string"},
-            "why_not_auto_answered": {"type": "string"},
-            "required_reply_shape": {"type": "string"},
-            "decision_tags": {"type": "array", "items": {"type": "string"}},
-            "options": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "label": {"type": "string"},
-                        "value": {"type": "string"},
-                        "description": {"type": "string"},
-                    },
-                    "required": ["label", "value"],
-                    "additionalProperties": False,
-                },
-            },
-            "notes": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": list(DEFAULT_EXECUTION_OUTPUT.keys()),
-        "additionalProperties": False,
-    }
-
-
-def _execution_prompt(
-    *,
-    project_root: Path,
-    design_contract: Mapping[str, Any],
-    baseline_docs: Sequence[str],
-    planning_doc: str,
-    human_decisions: Sequence[Any],
-) -> str:
-    selected_phase = design_contract.get("selected_phase", {})
-    if not isinstance(selected_phase, Mapping):
-        selected_phase = {}
-    lines = [
-        "You are the Harness execution-agent for AIMA-refactor.",
-        f"Project root: {project_root}",
-        "Read the required baseline docs first and then implement the current slice.",
-        "",
-        "Required baseline docs:",
-    ]
-    seen_docs: set[str] = set()
-    for path in list(baseline_docs) + ([planning_doc] if planning_doc else []):
-        normalized = coerce_str(path).strip()
-        if not normalized or normalized in seen_docs:
-            continue
-        seen_docs.add(normalized)
-        lines.append(f"- {path}")
-    lines.extend(
-        [
-            "",
-            "Current slice:",
-            f"- phase: {coerce_str(selected_phase.get('title')).strip() or 'unspecified active slice'}",
-            f"- goal: {coerce_str(design_contract.get('proposed_slice')).strip()}",
-        ]
-    )
-    work_items = _normalize_text_list(design_contract.get("work_items", []))
-    if work_items:
-        lines.append("- work items:")
-        for item in work_items:
-            lines.append(f"  - {item}")
-    target_paths = _normalize_text_list(design_contract.get("target_paths", []))
-    if target_paths:
-        lines.append("- target paths:")
-        for item in target_paths:
-            lines.append(f"  - {item}")
-    acceptance = _normalize_text_list(design_contract.get("acceptance_criteria", []))
-    if acceptance:
-        lines.append("- acceptance criteria:")
-        for item in acceptance:
-            lines.append(f"  - {item}")
-    human_constraints = _normalize_text_list(design_contract.get("human_constraints", []))
-    if human_constraints:
-        lines.append("- human constraints:")
-        for item in human_constraints:
-            lines.append(f"  - {item}")
-    supervisor_decision = design_contract.get("supervisor_decision", {})
-    if isinstance(supervisor_decision, Mapping):
-        supervisor_choice = coerce_str(supervisor_decision.get("choice")).strip()
-        if supervisor_choice:
-            lines.append(f"- supervisor choice: {supervisor_choice}")
-    if human_decisions:
-        lines.append("- prior human decisions:")
-        for item in human_decisions[-5:]:
-            if isinstance(item, Mapping):
-                body = coerce_str(item.get("body") or item.get("answer")).strip()
-                if body:
-                    lines.append(f"  - {body}")
-    lines.extend(
-        [
-            "",
-            "Execution rules:",
-            "- Use subagents for code modification work whenever the implementation can be decomposed safely.",
-            "- Modify the repository directly under the project root before claiming progress.",
-            "- Do not drift back into harness self-tests unless the current slice explicitly targets harness-engineering paths.",
-            "- Follow the repository AGENTS/architecture guidance and implement the mainline directly. Do not add fallback code, compatibility shims, or duplicate paths unless the docs explicitly require it.",
-            "- Run any targeted local checks you need for confidence, but the harness will run the required verification commands after you return.",
-            "- Only request human input for a real decision gate. Ordinary blockers must be handled autonomously.",
-            "- If you truly need a human decision, finish as much analysis as you can first and set needs_human=true in the final JSON.",
-            "",
-            "Return only JSON that matches the provided schema.",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _run_execution_subagent(
-    *,
-    project_root: Path,
-    design_contract: Mapping[str, Any],
-    baseline_docs: Sequence[str],
-    planning_doc: str,
-    human_decisions: Sequence[Any],
-    request_path: Path,
-    result_path: Path,
-    launcher_state_path: Path,
-    launcher_run_path: Path,
-) -> dict[str, Any]:
-    codex_executable = _find_codex_executable()
-    started_at = utc_now()
-    prompt = _execution_prompt(
-        project_root=project_root,
-        design_contract=design_contract,
-        baseline_docs=baseline_docs,
-        planning_doc=planning_doc,
-        human_decisions=human_decisions,
-    )
-    schema_path = request_path.with_name(request_path.stem + "-schema.json")
-    output_path = result_path.with_suffix(".message.json")
-    request_payload = {
-        "project_root": str(project_root),
-        "baseline_docs": list(baseline_docs),
-        "planning_doc": planning_doc,
-        "design_contract": dict(design_contract),
-        "prompt": prompt,
-        "codex_executable": codex_executable,
-        "schema_path": str(schema_path),
-        "output_path": str(output_path),
-        "recorded_at": started_at,
-    }
-    _write_json(request_path, request_payload)
-    launcher_state_path.parent.mkdir(parents=True, exist_ok=True)
-    launcher_run_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_json(
-        launcher_state_path,
-        {
-            "status": "running",
-            "active_run_id": launcher_run_path.stem,
-            "last_request_path": str(request_path),
-            "last_result_path": str(result_path),
-            "last_cycle_id": request_path.parent.name,
-            "started_at": started_at,
-        },
-    )
-    if not codex_executable:
-        payload = {
-            "ok": False,
-            "exit_code": -1,
-            "started_at": started_at,
-            "completed_at": utc_now(),
-            "stdout": "",
-            "stderr": "codex executable was not found on PATH",
-            "parsed_output": dict(DEFAULT_EXECUTION_OUTPUT),
-            "pre_git_status": _git_status_snapshot(project_root),
-            "post_git_status": _git_status_snapshot(project_root),
-            "command": [],
-        }
-        _write_json(result_path, payload)
-        _write_json(
-            launcher_state_path,
-            {
-                "status": "failed",
-                "active_run_id": "",
-                "last_request_path": str(request_path),
-                "last_result_path": str(result_path),
-                "last_exit_code": -1,
-                "completed_at": payload["completed_at"],
-            },
-        )
-        _write_json(launcher_run_path, payload)
-        return payload
-
-    schema_path.write_text(
-        json.dumps(_execution_output_schema(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    pre_git_status = _git_status_snapshot(project_root)
-    command = [
-        codex_executable,
-        "exec",
-        prompt,
-        "-C",
-        str(project_root),
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--output-schema",
-        str(schema_path),
-        "-o",
-        str(output_path),
-    ]
-    completed = subprocess.run(
-        command,
-        cwd=str(project_root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-    parsed_output = dict(DEFAULT_EXECUTION_OUTPUT)
-    if output_path.exists():
-        try:
-            loaded = json.loads(output_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, Mapping):
-                parsed_output.update(dict(loaded))
-        except json.JSONDecodeError:
-            parsed_output["notes"] = list(parsed_output.get("notes", [])) + [
-                f"Failed to parse {output_path.name} as JSON.",
-            ]
-    post_git_status = _git_status_snapshot(project_root)
-    payload = {
-        "ok": completed.returncode == 0,
-        "command": command,
-        "cwd": str(project_root),
-        "exit_code": completed.returncode,
-        "started_at": started_at,
-        "completed_at": utc_now(),
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-        "parsed_output": parsed_output,
-        "pre_git_status": pre_git_status,
-        "post_git_status": post_git_status,
-    }
-    _write_json(result_path, payload)
-    _write_json(launcher_run_path, payload)
-    _write_json(
-        launcher_state_path,
-        {
-            "status": "completed" if payload["ok"] else "failed",
-            "active_run_id": "",
-            "last_request_path": str(request_path),
-            "last_result_path": str(result_path),
-            "last_exit_code": completed.returncode,
-            "completed_at": payload["completed_at"],
-        },
-    )
-    return payload
-
-
 def _design_contract_from_docs(
     *,
     doc_root: Path,
@@ -1179,6 +560,7 @@ def _design_contract_from_docs(
     selected_primary_doc: str,
     maintenance_findings: Sequence[Any],
     completed_slices: Sequence[Any],
+    reserved_slice_keys: Sequence[str] = (),
 ) -> dict[str, Any]:
     planning_doc = _preferred_planning_doc(doc_bundle)
     baseline_docs = _preferred_baseline_docs(doc_bundle)
@@ -1186,10 +568,16 @@ def _design_contract_from_docs(
     planning_text = _read_doc_text(doc_root, planning_doc)
     doc_text = planning_text or _read_doc_text(doc_root, doc_path)
     phases = _extract_phase_plans(doc_text)
+    completed_slice_keys = _completed_slice_keys(completed_slices)
+    reserved_keys = {coerce_str(item).strip() for item in reserved_slice_keys if coerce_str(item).strip()}
+    effective_completed = list(completed_slices)
+    for slice_key in reserved_keys - completed_slice_keys:
+        plan_doc, _, phase_title = slice_key.partition("::")
+        effective_completed.append({"slice_key": slice_key, "selected_planning_doc": plan_doc, "phase_title": phase_title})
     selected_phase = _select_active_phase(
         phases,
         planning_doc=planning_doc,
-        completed_slices=completed_slices,
+        completed_slices=effective_completed,
     )
     verification_expectation = _verification_expectation_from_text(
         planning_text or doc_text,
@@ -1220,7 +608,7 @@ def _design_contract_from_docs(
         done_criteria = [
             "Verification runs against the target project root rather than the harness repository root.",
         ]
-    completed_slice_keys = _completed_slice_keys(completed_slices)
+    completed_slice_keys = _completed_slice_keys(effective_completed)
     selected_phase_title = coerce_str(selected_phase.get("title")).strip()
     slice_key = _slice_key(planning_doc, selected_phase_title)
     if not slice_key:
@@ -1248,7 +636,7 @@ def _design_contract_from_docs(
             1
             for phase in phases
             if _slice_key(planning_doc, coerce_str(phase.get("title")).strip())
-            not in _completed_slice_keys(completed_slices)
+            not in _completed_slice_keys(effective_completed)
         ),
         "proposed_slice": (
             f"Advance {selected_phase.get('title') or 'the active slice'} under {project_root}."
@@ -1262,55 +650,6 @@ def _design_contract_from_docs(
         "maintenance_findings": list(maintenance_findings),
     }
     return contract
-
-
-def _verification_scope_findings(
-    design_contract: Mapping[str, Any],
-    verification_runs: Sequence[Mapping[str, Any]],
-) -> list[str]:
-    findings: list[str] = []
-    execution_scope = coerce_str(design_contract.get("execution_scope")).strip()
-    project_root_text = coerce_str(design_contract.get("project_root")).strip()
-    if not execution_scope or not project_root_text:
-        return findings
-    project_root = Path(project_root_text)
-    for run in verification_runs:
-        command_display = coerce_str(run.get("command_display")).strip()
-        cwd_text = coerce_str(run.get("cwd")).strip()
-        if not cwd_text:
-            findings.append("Execution recorded a verification run without a cwd.")
-            continue
-        cwd = Path(cwd_text)
-        if execution_scope == "external_project":
-            if same_path(cwd, HARNESS_ROOT):
-                findings.append(
-                    "Execution verified the harness repository instead of the target project root."
-                )
-            elif not path_within(cwd, project_root):
-                findings.append(
-                    f"Verification cwd {cwd} is outside the target project root {project_root}."
-                )
-        if "tests.test_runtime_files" in command_display:
-            findings.append("Execution fell back to harness-only runtime file tests.")
-    return findings
-
-
-def _audit_failure_signature(report: Mapping[str, Any]) -> str:
-    design_contract = report.get("design_contract", {})
-    if not isinstance(design_contract, Mapping):
-        design_contract = {}
-    selected_phase = design_contract.get("selected_phase", {})
-    if not isinstance(selected_phase, Mapping):
-        selected_phase = {}
-    payload = {
-        "selected_primary_doc": coerce_str(design_contract.get("selected_primary_doc")).strip(),
-        "selected_phase": coerce_str(selected_phase.get("title")).strip(),
-        "verification_commands": report.get("verification_commands", []),
-        "findings": _normalize_text_list(report.get("findings", [])),
-    }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
 def _cleanup_runtime_temp_files(runtime_root: Path) -> list[dict[str, str]]:
     actions: list[dict[str, str]] = []
     for path in sorted(runtime_root.rglob("*.tmp-*")):
@@ -1410,7 +749,43 @@ class HarnessScheduler:
         self.mission.extra.setdefault("auto_answers", {})
         self.mission.extra.setdefault("maintenance_findings", [])
         self.mission.extra.setdefault("completed_slices", [])
+        self.mission.extra.setdefault("planned_slice_queue", [])
+        self.mission.extra.setdefault("running_agent_runs", [])
+        self.mission.extra.setdefault("completed_agent_queue", [])
+        self.mission.extra.setdefault("managed_worktrees", [])
+        self.mission.extra.setdefault("prefetch_completed", False)
         self.mission.extra.setdefault("supervisor_decisions", [])
+        self.mission.extra.setdefault("pending_agent_briefs", {})
+        legacy_execution_runs = self.mission.extra.pop("running_execution_runs", [])
+        if isinstance(legacy_execution_runs, list) and legacy_execution_runs:
+            migrated_runs = self._running_agent_runs()
+            migrated_runs.extend(
+                {
+                    **dict(item),
+                    "agent_id": coerce_str(item.get("agent_id")).strip() or (self.execution_agent_id or "execution"),
+                }
+                for item in legacy_execution_runs
+                if isinstance(item, Mapping)
+            )
+            self._set_running_agent_runs(migrated_runs)
+        legacy_execution_queue = self.mission.extra.pop("completed_execution_queue", [])
+        if isinstance(legacy_execution_queue, list) and legacy_execution_queue:
+            migrated_queue = self._completed_agent_queue()
+            migrated_queue.extend(
+                {
+                    **dict(item),
+                    "agent_id": coerce_str(item.get("agent_id")).strip() or (self.execution_agent_id or "execution"),
+                    "status": coerce_str(item.get("status")).strip() or "waiting_audit",
+                }
+                for item in legacy_execution_queue
+                if isinstance(item, Mapping)
+            )
+            self._set_completed_agent_queue(migrated_queue)
+        legacy_execution_brief = self.mission.extra.pop("pending_execution_brief", None)
+        if legacy_execution_brief and isinstance(legacy_execution_brief, Mapping):
+            pending_agent_briefs = self._pending_agent_briefs()
+            pending_agent_briefs[self.execution_agent_id or "execution"] = dict(legacy_execution_brief)
+            self.mission.extra["pending_agent_briefs"] = pending_agent_briefs
         legacy_pending_supervisor_decision = self.state.extra.pop("pending_supervisor_decision", None)
         if legacy_pending_supervisor_decision and "pending_supervisor_decision" not in self.mission.extra:
             self.mission.extra["pending_supervisor_decision"] = legacy_pending_supervisor_decision
@@ -1436,15 +811,12 @@ class HarnessScheduler:
         elif self.state.active_agent and self.state.active_agent not in self.specs_by_id:
             self.state.extra["recovery_requested"] = True
             self.state.active_agent = self._default_work_entry_agent()
-        elif not self.state.active_agent and self._runtime_status() not in {"waiting_human", "completed", "failed"}:
-            self.state.active_agent = self._default_work_entry_agent()
 
     def _save_runtime(self) -> None:
         save_mission(self.paths.memory_root, self.mission)
         save_state(self.paths.memory_root, self.state)
 
     def _clear_audit_reopen_tracking(self) -> None:
-        self.state.extra.pop("last_audit_failure_signature", None)
         self.state.extra.pop("audit_reopen_streak", None)
 
     def _record_completed_slice(self, design_contract: Mapping[str, Any]) -> None:
@@ -1494,6 +866,11 @@ class HarnessScheduler:
             "state": self.state.to_mapping(),
             "pending_gate_id": coerce_str(self.state.extra.get("pending_gate_id")) or None,
             "runtime_status": self._runtime_status(),
+            "running_agents": self._running_agents_snapshot(),
+            "queued_slices": self._queued_slices_snapshot(),
+            "recent_events": self._recent_events(),
+            "agent_statuses": self._agent_statuses_snapshot(),
+            "managed_worktrees": self._managed_worktrees(),
         }
 
     def run_agent(
@@ -1547,6 +924,492 @@ class HarnessScheduler:
                 return spec["id"]
         return self.specs[0]["id"]
 
+    def _running_agent_runs(self) -> list[dict[str, Any]]:
+        payload = self.mission.extra.get("running_agent_runs", [])
+        if not isinstance(payload, list):
+            return []
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+    def _set_running_agent_runs(self, runs: Sequence[Mapping[str, Any]]) -> None:
+        self.mission.extra["running_agent_runs"] = [dict(item) for item in runs if isinstance(item, Mapping)]
+
+    def _running_agent(self, agent_id: str) -> list[dict[str, Any]]:
+        normalized = coerce_str(agent_id).strip()
+        return [
+            item
+            for item in self._running_agent_runs()
+            if coerce_str(item.get("agent_id")).strip() == normalized
+        ]
+
+    def _completed_agent_queue(self) -> list[dict[str, Any]]:
+        payload = self.mission.extra.get("completed_agent_queue", [])
+        if not isinstance(payload, list):
+            return []
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+    def _set_completed_agent_queue(self, queue: Sequence[Mapping[str, Any]]) -> None:
+        self.mission.extra["completed_agent_queue"] = [dict(item) for item in queue if isinstance(item, Mapping)]
+
+    def _completed_agent_entries(self, agent_id: str) -> list[dict[str, Any]]:
+        normalized = coerce_str(agent_id).strip()
+        return [
+            item
+            for item in self._completed_agent_queue()
+            if coerce_str(item.get("agent_id")).strip() == normalized
+        ]
+
+    def _running_execution_runs(self) -> list[dict[str, Any]]:
+        return self._running_agent(self.execution_agent_id or "execution")
+
+    def _completed_execution_queue(self) -> list[dict[str, Any]]:
+        return self._completed_agent_entries(self.execution_agent_id or "execution")
+
+    def _managed_worktrees(self) -> list[dict[str, Any]]:
+        payload = self.mission.extra.get("managed_worktrees", [])
+        if not isinstance(payload, list):
+            return []
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+    def _set_managed_worktrees(self, entries: Sequence[Mapping[str, Any]]) -> None:
+        self.mission.extra["managed_worktrees"] = [dict(item) for item in entries if isinstance(item, Mapping)]
+
+    def _find_managed_worktree(self, *, slice_key: str, agent_id: str) -> dict[str, Any] | None:
+        normalized_slice_key = coerce_str(slice_key).strip()
+        normalized_agent_id = coerce_str(agent_id).strip()
+        for item in self._managed_worktrees():
+            if (
+                coerce_str(item.get("slice_key")).strip() == normalized_slice_key
+                and coerce_str(item.get("agent_id")).strip() == normalized_agent_id
+            ):
+                return item
+        return None
+
+    def _remember_managed_worktree(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        slice_key = coerce_str(payload.get("slice_key")).strip()
+        agent_id = coerce_str(payload.get("agent_id")).strip()
+        updated = False
+        entries: list[dict[str, Any]] = []
+        for item in self._managed_worktrees():
+            if (
+                coerce_str(item.get("slice_key")).strip() == slice_key
+                and coerce_str(item.get("agent_id")).strip() == agent_id
+            ):
+                merged = dict(item)
+                merged.update(dict(payload))
+                entries.append(merged)
+                updated = True
+            else:
+                entries.append(item)
+        if not updated:
+            entries.append(dict(payload))
+        self._set_managed_worktrees(entries)
+        return dict(payload)
+
+    def _drop_managed_worktree(self, *, slice_key: str, agent_id: str) -> dict[str, Any] | None:
+        normalized_slice_key = coerce_str(slice_key).strip()
+        normalized_agent_id = coerce_str(agent_id).strip()
+        removed: dict[str, Any] | None = None
+        entries: list[dict[str, Any]] = []
+        for item in self._managed_worktrees():
+            if (
+                removed is None
+                and coerce_str(item.get("slice_key")).strip() == normalized_slice_key
+                and coerce_str(item.get("agent_id")).strip() == normalized_agent_id
+            ):
+                removed = dict(item)
+                continue
+            entries.append(item)
+        self._set_managed_worktrees(entries)
+        return removed
+
+    def _ensure_agent_worktree(
+        self,
+        *,
+        agent_id: str,
+        slice_key: str,
+        canonical_project_root: Path,
+        phase_title: str,
+    ) -> dict[str, Any]:
+        normalized_agent_id = coerce_str(agent_id).strip()
+        existing = self._find_managed_worktree(slice_key=slice_key, agent_id=normalized_agent_id)
+        if existing and Path(coerce_str(existing.get("path")).strip()).exists():
+            existing_path = Path(coerce_str(existing.get("path")).strip()).resolve()
+            if worktree_common_dir(existing_path) == worktree_common_dir(canonical_project_root):
+                existing["status"] = "assigned"
+                existing["last_assigned_at"] = utc_now()
+                self._remember_managed_worktree(existing)
+                return existing
+            self._drop_managed_worktree(slice_key=slice_key, agent_id=normalized_agent_id)
+            try:
+                remove_supervised_worktree(
+                    project_root=Path(
+                        coerce_str(existing.get("project_root")).strip() or str(canonical_project_root)
+                    ),
+                    worktree_root=existing_path,
+                )
+            except Exception:
+                shutil.rmtree(existing_path, ignore_errors=True)
+        info = ensure_supervised_worktree(
+            worktrees_dir=self.paths.worktrees_dir,
+            project_root=canonical_project_root,
+            key=slice_key,
+            label=f"{normalized_agent_id}-{phase_title or slice_key}",
+        )
+        entry = {
+            "agent_id": normalized_agent_id,
+            "slice_key": slice_key,
+            "phase_title": phase_title,
+            "path": info["path"],
+            "name": info["name"],
+            "project_root": info["project_root"],
+            "status": "assigned",
+            "created_at": utc_now(),
+            "last_assigned_at": utc_now(),
+        }
+        self._remember_managed_worktree(entry)
+        self._append_recent_event(
+            kind="worktree_assigned",
+            summary=f"Supervisor assigned worktree {entry['name']} for {phase_title or slice_key}.",
+            details={"slice_key": slice_key, "path": entry["path"]},
+        )
+        self._save_runtime()
+        return entry
+
+    def _ensure_execution_worktree(
+        self,
+        *,
+        slice_key: str,
+        canonical_project_root: Path,
+        phase_title: str,
+    ) -> dict[str, Any]:
+        return self._ensure_agent_worktree(
+            agent_id=self.execution_agent_id or "execution",
+            slice_key=slice_key,
+            canonical_project_root=canonical_project_root,
+            phase_title=phase_title,
+        )
+
+    def _promote_execution_worktree(self, design_contract: Mapping[str, Any]) -> list[dict[str, Any]]:
+        slice_key = coerce_str(design_contract.get("slice_key")).strip()
+        if not slice_key:
+            return []
+        entry = self._find_managed_worktree(slice_key=slice_key, agent_id=self.execution_agent_id or "execution")
+        if entry is None:
+            return []
+        actions = promote_worktree_to_project_root(
+            worktree_root=Path(coerce_str(entry.get("path")).strip()),
+            project_root=Path(coerce_str(entry.get("project_root")).strip() or coerce_str(design_contract.get("canonical_project_root")).strip()),
+        )
+        entry["status"] = "promoted"
+        entry["last_promoted_at"] = utc_now()
+        self._remember_managed_worktree(entry)
+        self._append_recent_event(
+            kind="worktree_promoted",
+            summary=f"Supervisor promoted worktree {coerce_str(entry.get('name')).strip()} into the canonical repository.",
+            details={"slice_key": slice_key, "action_count": len(actions)},
+        )
+        return actions
+
+    def _release_execution_worktree(self, design_contract: Mapping[str, Any]) -> None:
+        slice_key = coerce_str(design_contract.get("slice_key")).strip()
+        if not slice_key:
+            return
+        self._release_agent_worktree(
+            agent_id=self.execution_agent_id or "execution",
+            slice_key=slice_key,
+            canonical_project_root=coerce_str(design_contract.get("canonical_project_root")).strip()
+            or coerce_str(design_contract.get("project_root")).strip(),
+        )
+
+    def _release_agent_worktree(
+        self,
+        *,
+        agent_id: str,
+        slice_key: str,
+        canonical_project_root: str,
+    ) -> None:
+        entry = self._drop_managed_worktree(slice_key=slice_key, agent_id=agent_id)
+        if entry is None:
+            return
+        remove_supervised_worktree(
+            project_root=Path(coerce_str(entry.get("project_root")).strip() or canonical_project_root),
+            worktree_root=Path(coerce_str(entry.get("path")).strip()),
+        )
+        self._append_recent_event(
+            kind="worktree_released",
+            summary=f"Supervisor released worktree {coerce_str(entry.get('name')).strip() or slice_key}.",
+            details={"slice_key": slice_key},
+        )
+
+    def _pending_agent_briefs(self) -> dict[str, Any]:
+        payload = self.mission.extra.get("pending_agent_briefs", {})
+        return dict(payload) if isinstance(payload, Mapping) else {}
+
+    def _pending_agent_brief(self, agent_id: str) -> dict[str, Any] | None:
+        payload = self._pending_agent_briefs().get(agent_id)
+        return dict(payload) if isinstance(payload, Mapping) else None
+
+    def _set_pending_agent_brief(self, agent_id: str, payload: Mapping[str, Any] | None) -> None:
+        pending = self._pending_agent_briefs()
+        if payload:
+            pending[agent_id] = dict(payload)
+        else:
+            pending.pop(agent_id, None)
+        self.mission.extra["pending_agent_briefs"] = pending
+
+    def _pending_execution_brief(self) -> dict[str, Any] | None:
+        return self._pending_agent_brief(self.execution_agent_id or "execution")
+
+    def _set_pending_execution_brief(self, payload: Mapping[str, Any] | None) -> None:
+        self._set_pending_agent_brief(self.execution_agent_id or "execution", payload)
+
+    def _prefetch_completed(self) -> bool:
+        return coerce_bool(self.mission.extra.get("prefetch_completed"), False)
+
+    def _set_prefetch_completed(self, value: bool) -> None:
+        self.mission.extra["prefetch_completed"] = bool(value)
+
+    def _recent_events(self) -> list[dict[str, Any]]:
+        payload = self.state.extra.get("recent_events", [])
+        if not isinstance(payload, list):
+            return []
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+    def _append_recent_event(self, *, kind: str, summary: str, details: Mapping[str, Any] | None = None) -> None:
+        events = self._recent_events()
+        events.append(
+            {
+                "recorded_at": utc_now(),
+                "kind": kind,
+                "summary": summary,
+                "details": dict(details or {}),
+            }
+        )
+        self.state.extra["recent_events"] = events[-25:]
+
+    def _request_scheduler_yield(self) -> None:
+        self.state.extra["scheduler_yield"] = True
+
+    def _consume_scheduler_yield(self) -> bool:
+        return coerce_bool(self.state.extra.pop("scheduler_yield", False), False)
+
+    def _running_agents_snapshot(self) -> list[dict[str, Any]]:
+        agents: list[dict[str, Any]] = []
+        for run in self._running_agent_runs():
+            agents.append(
+                {
+                    "id": coerce_str(run.get("agent_id")).strip() or "agent",
+                    "status": coerce_str(run.get("status")).strip() or "running",
+                    "slice_key": coerce_str(run.get("slice_key")).strip(),
+                    "phase_title": coerce_str(run.get("phase_title")).strip(),
+                    "started_at": coerce_str(run.get("started_at")).strip(),
+                    "project_root": coerce_str(run.get("project_root")).strip(),
+                    "worktree_path": coerce_str(run.get("worktree_path")).strip(),
+                    "brief": coerce_str(run.get("brief")).strip(),
+                }
+            )
+        supervisor_focus = coerce_str(self.state.active_agent).strip()
+        if supervisor_focus and supervisor_focus not in {coerce_str(item.get("id")).strip() for item in agents}:
+            agents.append({"id": supervisor_focus, "status": "supervisor_focus"})
+        return agents
+
+    def _queued_slices_snapshot(self) -> list[dict[str, Any]]:
+        queued: list[dict[str, Any]] = []
+        for contract in self._planned_slice_queue():
+            queued.append(
+                {
+                    "slice_key": coerce_str(contract.get("slice_key")).strip(),
+                    "phase_title": coerce_str(
+                        contract.get("selected_phase", {}).get("title")
+                        if isinstance(contract.get("selected_phase"), Mapping)
+                        else ""
+                    ).strip(),
+                    "status": "prefetched",
+                }
+            )
+        for item in self._completed_agent_queue():
+            queued.append(
+                {
+                    "agent_id": coerce_str(item.get("agent_id")).strip(),
+                    "slice_key": coerce_str(item.get("slice_key")).strip(),
+                    "phase_title": coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("current_slice")).strip(),
+                    "status": coerce_str(item.get("status")).strip() or "queued",
+                }
+            )
+        return queued
+
+    def _latest_design_contract(self) -> dict[str, Any]:
+        latest_design_artifacts = self._latest_artifacts().get("design", [])
+        if not latest_design_artifacts:
+            return {}
+        try:
+            payload = self._load_json(str(latest_design_artifacts[-1]))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, Mapping) else {}
+
+    def _agent_statuses_snapshot(self) -> list[dict[str, Any]]:
+        active_agent = coerce_str(self.state.active_agent).strip()
+        runtime_status = self._runtime_status()
+        pending_gate_id = coerce_str(self.state.extra.get("pending_gate_id")).strip()
+        communication_brief = self._communication_brief() or {}
+        latest_human_reply = self._latest_human_reply() or {}
+        cleanup_mode = self._cleanup_mode()
+        running_agent_runs = self._running_agent_runs()
+        completed_agent_queue = self._completed_agent_queue()
+        planned_slice_queue = self._planned_slice_queue()
+        pending_agent_briefs = self._pending_agent_briefs()
+        latest_design_contract = self._latest_design_contract()
+        latest_phase = latest_design_contract.get("selected_phase", {})
+        if not isinstance(latest_phase, Mapping):
+            latest_phase = {}
+        latest_phase_title = coerce_str(latest_phase.get("title")).strip()
+        statuses: list[dict[str, Any]] = []
+
+        for spec in self.specs:
+            agent_id = spec["id"]
+            running_for_agent = [
+                item
+                for item in running_agent_runs
+                if coerce_str(item.get("agent_id")).strip() == agent_id
+            ]
+            queued_for_agent = [
+                item
+                for item in completed_agent_queue
+                if coerce_str(item.get("agent_id")).strip() == agent_id
+            ]
+            pending_brief = pending_agent_briefs.get(agent_id, {})
+            if not isinstance(pending_brief, Mapping):
+                pending_brief = {}
+            worktree_path = ""
+            current_slice = ""
+            current_brief = coerce_str(pending_brief.get("summary")).strip()
+            if running_for_agent:
+                first_run = running_for_agent[0]
+                worktree_path = coerce_str(first_run.get("worktree_path")).strip()
+                current_slice = coerce_str(first_run.get("phase_title")).strip() or coerce_str(first_run.get("slice_key")).strip()
+                if not current_brief:
+                    current_brief = coerce_str(first_run.get("brief")).strip()
+            elif queued_for_agent:
+                first_queue = queued_for_agent[0]
+                current_slice = coerce_str(first_queue.get("phase_title")).strip() or coerce_str(first_queue.get("slice_key")).strip()
+                if not current_brief:
+                    current_brief = coerce_str(first_queue.get("summary")).strip()
+            elif agent_id == self.design_agent_id and latest_phase_title:
+                current_slice = latest_phase_title
+            elif agent_id == self.execution_agent_id and latest_phase_title:
+                current_slice = latest_phase_title
+            entry = {
+                "id": agent_id,
+                "name": spec["name"],
+                "status": "idle",
+                "summary": "Idle.",
+                "details": [],
+                "queued": len(queued_for_agent),
+                "running": len(running_for_agent),
+                "blocked": bool(pending_gate_id and coerce_str(self.state.extra.get("blocked_agent")).strip() == agent_id),
+                "worktree": worktree_path,
+                "current_slice": current_slice,
+                "current_brief": current_brief,
+            }
+            if agent_id == self.communication_agent_id:
+                if latest_human_reply:
+                    entry["status"] = "reply_buffered"
+                    entry["summary"] = "A human reply is buffered for supervisor resume."
+                elif pending_gate_id:
+                    entry["status"] = "waiting_human"
+                    entry["summary"] = "Waiting for a human decision through the communication page."
+                    entry["details"] = [f"gate_id={pending_gate_id}"]
+                elif communication_brief:
+                    entry["status"] = "opening_gate"
+                    entry["summary"] = "Preparing a supervisor decision brief for the human page."
+                elif active_agent == agent_id:
+                    entry["status"] = "running"
+                    entry["summary"] = "Processing communication-side work."
+            elif agent_id == self.design_agent_id:
+                if running_for_agent:
+                    entry["status"] = "running"
+                    entry["summary"] = "Design is running in the background."
+                elif planned_slice_queue:
+                    queued_titles = [
+                        coerce_str(item.get("selected_phase", {}).get("title") if isinstance(item.get("selected_phase"), Mapping) else "").strip()
+                        for item in planned_slice_queue
+                    ]
+                    queued_titles = [item for item in queued_titles if item]
+                    entry["status"] = "prefetched"
+                    entry["summary"] = "The next slice is already prefetched."
+                    entry["details"] = queued_titles[:3]
+                elif queued_for_agent:
+                    entry["status"] = coerce_str(queued_for_agent[0].get("status")).strip() or "queued"
+                    entry["summary"] = "A completed design artifact is waiting for supervisor routing."
+                elif latest_phase_title:
+                    entry["status"] = "ready"
+                    entry["summary"] = f"Current contract is ready for {latest_phase_title}."
+                elif active_agent == agent_id:
+                    entry["status"] = "planning"
+                    entry["summary"] = "Preparing the current design contract."
+            elif agent_id == self.execution_agent_id:
+                if running_for_agent:
+                    titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in running_for_agent]
+                    entry["status"] = "running"
+                    entry["summary"] = "Executing approved slices in the background."
+                    entry["details"] = [item for item in titles if item][:3]
+                    worktree_paths = [
+                        coerce_str(item.get("worktree_path")).strip()
+                        for item in running_for_agent
+                        if coerce_str(item.get("worktree_path")).strip()
+                    ]
+                    if worktree_paths:
+                        entry["details"].append(f"worktree={worktree_paths[0]}")
+                elif queued_for_agent:
+                    titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in queued_for_agent]
+                    entry["status"] = "waiting_audit"
+                    entry["summary"] = "Execution finished and is waiting for audit."
+                    entry["details"] = [item for item in titles if item][:3]
+                elif pending_brief:
+                    entry["status"] = "retrying"
+                    entry["summary"] = "Supervisor routed the latest audit findings back to execution."
+                    entry["details"] = _normalize_text_list(pending_brief.get("findings", []))[:3]
+                elif active_agent == agent_id:
+                    entry["status"] = "launching"
+                    entry["summary"] = "Launching or polling execution work."
+                elif latest_phase_title:
+                    entry["status"] = "ready"
+                    entry["summary"] = f"Ready to execute {latest_phase_title}."
+            elif agent_id == self.audit_agent_id:
+                if running_for_agent:
+                    entry["status"] = "running"
+                    entry["summary"] = "Audit is reviewing evidence in the background."
+                elif queued_for_agent:
+                    titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in queued_for_agent]
+                    entry["status"] = "queued"
+                    entry["summary"] = "A completed audit verdict is waiting for supervisor routing."
+                    entry["details"] = [item for item in titles if item][:3]
+                elif self._completed_execution_queue():
+                    titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in self._completed_execution_queue()]
+                    entry["status"] = "queued"
+                    entry["summary"] = "Audit work is queued."
+                    entry["details"] = [item for item in titles if item][:3]
+                elif active_agent == agent_id:
+                    entry["status"] = "auditing"
+                    entry["summary"] = "Reviewing completed execution evidence."
+            elif agent_id == self.cleanup_agent_id:
+                if cleanup_mode:
+                    entry["status"] = cleanup_mode
+                    entry["summary"] = f"Running cleanup in {cleanup_mode} mode."
+                elif runtime_status == "completed":
+                    entry["status"] = "standby"
+                    entry["summary"] = "Waiting for the next maintenance or recovery request."
+            else:
+                if active_agent == agent_id:
+                    entry["status"] = "running"
+                    entry["summary"] = "Running."
+            if entry["blocked"]:
+                entry["status"] = "blocked"
+                entry["summary"] = "Supervisor paused this agent behind an explicit human gate."
+            statuses.append(entry)
+        return statuses
+
     def _communication_brief(self) -> dict[str, Any] | None:
         payload = self.state.extra.get("communication_brief")
         return dict(payload) if isinstance(payload, Mapping) else None
@@ -1566,19 +1429,6 @@ class HarnessScheduler:
             self.state.extra["latest_human_reply"] = dict(payload)
         else:
             self.state.extra.pop("latest_human_reply", None)
-
-    def _clear_audit_failure_streak(self) -> None:
-        self.state.extra.pop("last_audit_failure_signature", None)
-        self.state.extra.pop("last_audit_failure_count", None)
-
-    def _record_audit_failure_streak(self, report: Mapping[str, Any]) -> int:
-        signature = _audit_failure_signature(report)
-        previous_signature = coerce_str(self.state.extra.get("last_audit_failure_signature")).strip()
-        previous_count = coerce_int(self.state.extra.get("last_audit_failure_count"), 0)
-        next_count = previous_count + 1 if signature and signature == previous_signature else 1
-        self.state.extra["last_audit_failure_signature"] = signature
-        self.state.extra["last_audit_failure_count"] = next_count
-        return next_count
 
     def _communication_side_channel_pending(self) -> bool:
         return self._communication_brief() is not None or self._latest_human_reply() is not None
@@ -1628,6 +1478,8 @@ class HarnessScheduler:
         if self._runtime_status() == "running" and not self.state.active_agent and (
             self._runner_cycle_id() or self._runner_sequence() > 0
         ):
+            if self._current_running_execution() or self._completed_execution_queue():
+                return False
             return True
         return False
 
@@ -1682,9 +1534,29 @@ class HarnessScheduler:
                 self.state.active_agent = self.communication_agent_id
                 self._save_runtime()
             return
-        if not self.state.active_agent:
-            self.state.active_agent = self._default_work_entry_agent()
+        if self.state.active_agent:
+            return
+        if self.audit_agent_id and self._current_running_agent(self.audit_agent_id):
+            self.state.active_agent = self.audit_agent_id
             self._save_runtime()
+            return
+        if self._completed_execution_queue() and self.audit_agent_id:
+            self.state.active_agent = self.audit_agent_id
+            self._save_runtime()
+            return
+        if self.design_agent_id and self._current_running_agent(self.design_agent_id):
+            self.state.active_agent = self.design_agent_id
+            self._save_runtime()
+            return
+        if self._current_running_execution():
+            if not self._planned_slice_queue() and not self._prefetch_completed() and self.design_agent_id:
+                self.state.active_agent = self.design_agent_id
+            elif self.execution_agent_id:
+                self.state.active_agent = self.execution_agent_id
+            self._save_runtime()
+            return
+        self.state.active_agent = self._default_work_entry_agent()
+        self._save_runtime()
 
     def _restore_after_cleanup(self, default_resume_after: str) -> None:
         resume_status = self._cleanup_resume_status() or "running"
@@ -1742,7 +1614,6 @@ class HarnessScheduler:
         self.mission.extra["supervisor_decisions"] = history
         self._set_pending_supervisor_decision(None)
         self._clear_audit_reopen_tracking()
-        self._clear_audit_failure_streak()
 
     def _resume_if_human_replied(self) -> bool:
         gate_id = coerce_str(self.state.extra.get("pending_gate_id")).strip()
@@ -1761,7 +1632,6 @@ class HarnessScheduler:
         if pending_decision is not None:
             self._set_pending_supervisor_decision(pending_decision)
             self._clear_audit_reopen_tracking()
-            self._clear_audit_failure_streak()
         self.mission.status = "active"
         self._set_latest_human_reply(answer_payload)
         self.state.extra["resume_agent"] = coerce_str(self.state.extra.get("blocked_agent") or self.design_agent_id)
@@ -1797,6 +1667,115 @@ class HarnessScheduler:
                 return str(first.get("relative_path", ""))
         return ""
 
+    def _planned_slice_queue(self) -> list[dict[str, Any]]:
+        payload = self.mission.extra.get("planned_slice_queue", [])
+        if not isinstance(payload, list):
+            return []
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+    def _set_planned_slice_queue(self, contracts: Sequence[Mapping[str, Any]]) -> None:
+        self.mission.extra["planned_slice_queue"] = [dict(item) for item in contracts if isinstance(item, Mapping)]
+
+    def _find_running_agent(self, agent_id: str, slice_key: str) -> dict[str, Any] | None:
+        normalized_agent_id = coerce_str(agent_id).strip()
+        normalized_slice_key = coerce_str(slice_key).strip()
+        if not normalized_agent_id:
+            return None
+        for item in self._running_agent(agent_id):
+            if not normalized_slice_key or coerce_str(item.get("slice_key")).strip() == normalized_slice_key:
+                return item
+        return None
+
+    def _current_running_agent(self, agent_id: str) -> dict[str, Any] | None:
+        runs = self._running_agent(agent_id)
+        return dict(runs[0]) if runs else None
+
+    def _upsert_running_agent(self, payload: Mapping[str, Any]) -> None:
+        agent_id = coerce_str(payload.get("agent_id")).strip()
+        slice_key = coerce_str(payload.get("slice_key")).strip()
+        if not agent_id:
+            return
+        runs = self._running_agent_runs()
+        updated = False
+        next_runs: list[dict[str, Any]] = []
+        for item in runs:
+            same_agent = coerce_str(item.get("agent_id")).strip() == agent_id
+            same_slice = coerce_str(item.get("slice_key")).strip() == slice_key
+            if same_agent and same_slice and not updated:
+                merged = dict(item)
+                merged.update(dict(payload))
+                next_runs.append(merged)
+                updated = True
+            else:
+                next_runs.append(dict(item))
+        if not updated:
+            next_runs.append(dict(payload))
+        self._set_running_agent_runs(next_runs)
+
+    def _remove_running_agent(self, agent_id: str, slice_key: str) -> dict[str, Any] | None:
+        normalized_agent_id = coerce_str(agent_id).strip()
+        normalized_slice_key = coerce_str(slice_key).strip()
+        removed: dict[str, Any] | None = None
+        remaining: list[dict[str, Any]] = []
+        for item in self._running_agent_runs():
+            same_agent = coerce_str(item.get("agent_id")).strip() == normalized_agent_id
+            same_slice = coerce_str(item.get("slice_key")).strip() == normalized_slice_key
+            if same_agent and same_slice and removed is None:
+                removed = dict(item)
+                continue
+            remaining.append(dict(item))
+        self._set_running_agent_runs(remaining)
+        return removed
+
+    def _queue_completed_agent(self, payload: Mapping[str, Any]) -> None:
+        queue = self._completed_agent_queue()
+        artifact_path = coerce_str(payload.get("artifact_path") or payload.get("execution_artifact_path")).strip()
+        agent_id = coerce_str(payload.get("agent_id")).strip()
+        if artifact_path and any(
+            coerce_str(item.get("artifact_path") or item.get("execution_artifact_path")).strip() == artifact_path
+            and coerce_str(item.get("agent_id")).strip() == agent_id
+            for item in queue
+        ):
+            return
+        queue.append(dict(payload))
+        self._set_completed_agent_queue(queue)
+
+    def _consume_completed_agent(self, agent_id: str, artifact_path: str) -> None:
+        normalized_agent_id = coerce_str(agent_id).strip()
+        normalized_artifact = coerce_str(artifact_path).strip()
+        queue = [
+            dict(item)
+            for item in self._completed_agent_queue()
+            if not (
+                coerce_str(item.get("agent_id")).strip() == normalized_agent_id
+                and coerce_str(item.get("artifact_path") or item.get("execution_artifact_path")).strip() == normalized_artifact
+            )
+        ]
+        self._set_completed_agent_queue(queue)
+
+    def _find_running_execution(self, slice_key: str) -> dict[str, Any] | None:
+        return self._find_running_agent(self.execution_agent_id or "execution", slice_key)
+
+    def _current_running_execution(self) -> dict[str, Any] | None:
+        return self._current_running_agent(self.execution_agent_id or "execution")
+
+    def _upsert_running_execution(self, payload: Mapping[str, Any]) -> None:
+        next_payload = dict(payload)
+        next_payload["agent_id"] = self.execution_agent_id or "execution"
+        self._upsert_running_agent(next_payload)
+
+    def _remove_running_execution(self, slice_key: str) -> dict[str, Any] | None:
+        return self._remove_running_agent(self.execution_agent_id or "execution", slice_key)
+
+    def _queue_completed_execution(self, payload: Mapping[str, Any]) -> None:
+        next_payload = dict(payload)
+        next_payload["agent_id"] = self.execution_agent_id or "execution"
+        next_payload["artifact_path"] = coerce_str(payload.get("artifact_path") or payload.get("execution_artifact_path")).strip()
+        self._queue_completed_agent(next_payload)
+
+    def _consume_completed_execution(self, artifact_path: str) -> None:
+        self._consume_completed_agent(self.execution_agent_id or "execution", artifact_path)
+
     def _build_handoff(self, agent_id: str) -> dict[str, Any]:
         inputs: dict[str, Any] = {
             "doc_bundle": self.mission.extra.get("doc_bundle", {}),
@@ -1811,10 +1790,13 @@ class HarnessScheduler:
             "resume_agent": self.state.extra.get("resume_agent", ""),
             "auto_answers": self.mission.extra.get("auto_answers", {}),
             "maintenance_findings": self.mission.extra.get("maintenance_findings", []),
+            "managed_worktrees": self._managed_worktrees(),
         }
         if agent_id == self.communication_agent_id:
             inputs["communication_brief"] = self._communication_brief()
             inputs["latest_human_reply"] = self._latest_human_reply()
+        if agent_id == self.execution_agent_id:
+            inputs["pending_execution_brief"] = self._pending_execution_brief()
         if agent_id == self.cleanup_agent_id:
             inputs["cleanup_mode"] = self._cleanup_mode()
             inputs["resume_after_cleanup"] = self._resume_after_cleanup()
@@ -1925,369 +1907,22 @@ class HarnessScheduler:
         return "\n".join(item for item in lines if item)
 
     def _execute_turn(self, turn: RunnerTurn) -> dict[str, Any]:
-        agent_id = turn.agent_spec["id"]
-        inputs = turn.handoff.get("inputs", {})
-        doc_bundle = turn.mission.get("doc_bundle", {})
-        latest_artifacts = inputs.get("latest_artifacts", {})
-        doc_root = Path(turn.mission.get("doc_root", self.paths.memory_root)).resolve()
-        project_root = Path(
-            coerce_str(turn.mission.get("project_root") or inputs.get("project_root"))
-        ).resolve() if coerce_str(turn.mission.get("project_root") or inputs.get("project_root")).strip() else project_root_from_doc_root(doc_root)
-
-        if agent_id == self.communication_agent_id:
-            brief = inputs.get("communication_brief", {})
-            latest_human_reply = inputs.get("latest_human_reply", {})
-            if isinstance(latest_human_reply, Mapping) and latest_human_reply:
-                artifact_path = self._artifact_path(turn, "human-reply")
-                _write_json(
-                    artifact_path,
-                    {
-                        "reply": dict(latest_human_reply),
-                        "communication_brief": dict(brief) if isinstance(brief, Mapping) else {},
-                        "resume_agent": inputs.get("resume_agent", ""),
-                        "recorded_at": utc_now(),
-                    },
-                )
-                return {
-                    "status": "completed",
-                    "summary": "Recorded the human reply and returned control to supervisor.",
-                    "communication_action": "reply_recorded",
-                    "artifacts": [str(artifact_path)],
-                }
-            if isinstance(brief, Mapping) and brief:
-                prompt = self._render_communication_prompt(brief)
-                gate = turn.communication_store.open_gate(
-                    title=coerce_str(brief.get("title"), "Decision gate").strip() or "Decision gate",
-                    prompt=prompt,
-                    source="supervisor",
-                    severity=coerce_str(brief.get("severity"), "decision_gate").strip() or "decision_gate",
-                    context=json.dumps(dict(brief), ensure_ascii=False),
-                )
-                artifact_path = self._artifact_path(turn, "gate")
-                _write_json(
-                    artifact_path,
-                    {
-                        "gate": gate,
-                        "communication_brief": dict(brief),
-                        "rendered_prompt": prompt,
-                        "created_at": utc_now(),
-                    },
-                )
-                return {
-                    "status": "blocked",
-                    "summary": f"Opened decision gate {gate['id']}",
-                    "gate_id": gate["id"],
-                    "communication_action": "gate_opened",
-                    "artifacts": [str(artifact_path), str(turn.communication_store.state_file)],
-                }
-            artifact_path = self._artifact_path(turn, "idle")
-            _write_json(
-                artifact_path,
-                {
-                    "summary": "Communication agent had no pending brief or reply to process.",
-                    "recorded_at": utc_now(),
-                },
-            )
-            return {
-                "status": "completed",
-                "summary": "Communication agent had no pending work.",
-                "communication_action": "idle",
-                "artifacts": [str(artifact_path)],
-            }
-
-        if agent_id == self.design_agent_id:
-            if int(doc_bundle.get("doc_count", 0)) == 0:
-                return {
-                    "status": "blocked",
-                    "summary": "No UTF-8 docs were discovered under the provided doc root.",
-                    "questions": [
-                        {
-                            "question_id": _new_id("question"),
-                            "agent": "design",
-                            "question": "当前 doc 主目录下没有可读的总体规划/设计文档，是否需要重新指定文档目录？",
-                            "blocking": True,
-                            "importance": "high",
-                            "tags": ["goal_conflict"],
-                            "context": {"doc_root": turn.mission.get("doc_root", "")},
-                        }
-                    ],
-                }
-            selected_primary_doc = coerce_str(inputs.get("selected_primary_doc")).strip()
-            auto_answers = inputs.get("auto_answers", {})
-            if not selected_primary_doc and doc_bundle.get("primary_docs"):
-                first_question = next(iter(auto_answers.values()), None)
-                if isinstance(first_question, Mapping):
-                    selected_primary_doc = coerce_str(first_question.get("answer")).strip()
-            if not selected_primary_doc:
-                selected_primary_doc = _preferred_planning_doc(doc_bundle)
-            gate_signals = doc_bundle.get("gate_signals", [])
-            human_decisions = inputs.get("human_decisions", [])
-            if gate_signals and not human_decisions:
-                gate_signal = gate_signals[0]
-                return {
-                    "status": "blocked",
-                    "summary": "Design detected a decision gate in the planning docs.",
-                    "questions": [
-                        {
-                            "question_id": _new_id("question"),
-                            "agent": "design",
-                            "question": f"{gate_signal['relative_path']}:{gate_signal['line_number']} 提到了需要决策的事项：{gate_signal['prompt']}",
-                            "blocking": True,
-                            "importance": "high",
-                            "tags": [gate_signal["tag"]],
-                            "context": gate_signal,
-                        }
-                    ],
-                }
-            if not selected_primary_doc and len(doc_bundle.get("docs", [])) > 1 and not auto_answers:
-                candidate_paths = [item["relative_path"] for item in doc_bundle.get("primary_docs", [])[:3]]
-                return {
-                    "status": "blocked",
-                    "summary": "Design needs a primary planning document, but this is an ordinary blocker.",
-                    "questions": [
-                        {
-                            "question_id": _new_id("question"),
-                            "agent": "design",
-                            "question": "应该优先以哪个规划文档作为当前主线入口？",
-                            "blocking": False,
-                            "importance": "low",
-                            "tags": ["path"],
-                            "context": {"candidate_paths": candidate_paths},
-                        }
-                    ],
-                }
-            design_contract = _design_contract_from_docs(
-                doc_root=doc_root,
-                project_root=project_root,
-                doc_bundle=doc_bundle if isinstance(doc_bundle, Mapping) else {},
-                selected_primary_doc=selected_primary_doc,
-                maintenance_findings=_normalize_text_list(inputs.get("maintenance_findings", [])),
-                completed_slices=inputs.get("completed_slices", []),
-            )
-            pending_supervisor_decision = inputs.get("pending_supervisor_decision")
-            if isinstance(pending_supervisor_decision, Mapping) and pending_supervisor_decision:
-                design_contract = _contract_for_supervisor_decision(design_contract, pending_supervisor_decision)
-                self._consume_pending_supervisor_decision(design_contract)
-            self.mission.extra["selected_primary_doc"] = design_contract["selected_primary_doc"]
-            self.mission.extra["project_root"] = str(project_root)
-            artifact_path = self._artifact_path(turn, "contract")
-            _write_json(artifact_path, design_contract)
-            if coerce_str(design_contract.get("work_status")).strip() == "completed":
-                return {
-                    "status": "completed",
-                    "summary": "Design found no remaining planned slices to execute.",
-                    "design_status": "completed",
-                    "artifacts": [str(artifact_path)],
-                }
-            return {
-                "status": "completed",
-                "summary": f"Prepared the next slice from {doc_bundle.get('doc_count', 0)} document(s).",
-                "design_status": "ready",
-                "artifacts": [str(artifact_path)],
-            }
-
-        if agent_id == self.execution_agent_id:
-            design_artifacts = latest_artifacts.get("design", [])
-            design_contract = self._load_json(design_artifacts[-1]) if design_artifacts else {}
-            execution_project_root = Path(
-                coerce_str(design_contract.get("project_root") or project_root)
-            ).resolve()
-            baseline_docs = _normalize_text_list(design_contract.get("baseline_docs", []))
-            planning_doc = coerce_str(design_contract.get("selected_planning_doc")).strip()
-            request_artifact_path = self._artifact_path(turn, "codex-request")
-            result_artifact_path = self._artifact_path(turn, "codex-result")
-            launcher_dir = self.paths.launchers_dir / "codex_exec"
-            launcher_state_path = launcher_dir / "state.json"
-            launcher_run_path = launcher_dir / "runs" / f"{turn.cycle_id}-{turn.sequence:02d}.json"
-            execution_result = _run_execution_subagent(
-                project_root=execution_project_root,
-                design_contract=design_contract,
-                baseline_docs=baseline_docs,
-                planning_doc=planning_doc,
-                human_decisions=inputs.get("human_decisions", []),
-                request_path=request_artifact_path,
-                result_path=result_artifact_path,
-                launcher_state_path=launcher_state_path,
-                launcher_run_path=launcher_run_path,
-            )
-            execution_output = execution_result.get("parsed_output", {})
-            if not isinstance(execution_output, Mapping):
-                execution_output = dict(DEFAULT_EXECUTION_OUTPUT)
-            needs_human = bool(execution_output.get("needs_human"))
-            if needs_human:
-                return {
-                    "status": "blocked",
-                    "summary": coerce_str(execution_output.get("summary")).strip() or "Execution needs a decision before it can continue.",
-                    "questions": [
-                        {
-                            "question_id": _new_id("question"),
-                            "agent": "execution",
-                            "question": coerce_str(execution_output.get("human_question")).strip() or "Execution requires a human decision.",
-                            "blocking": True,
-                            "importance": "high",
-                            "tags": _normalize_text_list(execution_output.get("decision_tags", [])) or ["goal_conflict"],
-                            "context": {
-                                "title": "Execution needs a decision",
-                                "options": execution_output.get("options", []),
-                                "tradeoffs": execution_output.get("notes", []),
-                                "required_reply_shape": coerce_str(execution_output.get("required_reply_shape")).strip(),
-                                "supervisor_recommendation": coerce_str(execution_output.get("why_not_auto_answered")).strip(),
-                                "selected_primary_doc": design_contract.get("selected_primary_doc", ""),
-                                "selected_phase": design_contract.get("selected_phase", {}),
-                            },
-                        }
-                    ],
-                    "artifacts": [str(request_artifact_path), str(result_artifact_path)],
-                }
-            verification_specs = _verification_specs(
-                design_contract,
-                project_root=execution_project_root,
-                doc_root=doc_root,
-            )
-            verification_runs = [_run_verification_command(spec) for spec in verification_specs]
-            verification_ok, verification_findings = _verification_acceptance_from_runs(
-                verification_runs,
-                expected_count=len(verification_specs),
-            )
-            scope_findings = _verification_scope_findings(design_contract, verification_runs)
-            if scope_findings:
-                verification_ok = False
-                verification_findings = list(verification_findings) + scope_findings
-            artifact_path = self._artifact_path(turn, "execution")
-            _write_json(
-                artifact_path,
-                {
-                    "goal": turn.mission.get("goal", ""),
-                    "project_root": str(execution_project_root),
-                    "selected_primary_doc": design_contract.get("selected_primary_doc") or inputs.get("selected_primary_doc", ""),
-                    "design_contract": design_contract,
-                    "execution_subagent": execution_result,
-                    "execution_output": execution_output,
-                    "verification_expectation": design_contract.get("verification_expectation", []),
-                    "verification_specs": verification_specs,
-                    "verification_commands": [spec.get("command", []) for spec in verification_specs],
-                    "work_items": design_contract.get("work_items", []),
-                    "target_paths": design_contract.get("target_paths", []),
-                    "verification_runs": verification_runs,
-                    "verification_status": "passed" if verification_ok else "failed",
-                    "verification_findings": verification_findings,
-                    "recorded_at": utc_now(),
-                },
-            )
-            return {
-                "status": "completed",
-                "summary": f"Ran {len(verification_runs)} verification command(s); {sum(1 for run in verification_runs if run.get('returncode') == 0)} passed.",
-                "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
-            }
-
-        if agent_id == self.audit_agent_id:
-            execution_artifacts = latest_artifacts.get("execution", [])
-            execution_plan = self._load_json(execution_artifacts[-1]) if execution_artifacts else {}
-            verification_runs = execution_plan.get("verification_runs", [])
-            verification_commands = execution_plan.get("verification_commands", [])
-            design_contract = execution_plan.get("design_contract", {})
-            execution_subagent = execution_plan.get("execution_subagent", {})
-            execution_output = execution_plan.get("execution_output", {})
-            accepted, findings = _verification_acceptance_from_runs(
-                verification_runs if isinstance(verification_runs, Sequence) and not isinstance(verification_runs, (str, bytes, bytearray)) else [],
-                expected_count=_count_sequence_items(verification_commands),
-            )
-            scope_findings = _verification_scope_findings(
-                design_contract if isinstance(design_contract, Mapping) else {},
-                verification_runs if isinstance(verification_runs, Sequence) and not isinstance(verification_runs, (str, bytes, bytearray)) else [],
-            )
-            if scope_findings:
-                findings = list(findings) + scope_findings
-                accepted = False
-            if not isinstance(execution_subagent, Mapping) or not execution_subagent:
-                findings = list(findings) + ["Execution did not record any subagent implementation evidence."]
-                accepted = False
-            else:
-                exit_code = coerce_int(execution_subagent.get("exit_code"), 0)
-                if exit_code != 0:
-                    findings = list(findings) + [f"Execution subagent exited with code {exit_code}."]
-                    accepted = False
-            if isinstance(execution_output, Mapping):
-                if coerce_bool(execution_output.get("needs_human"), False):
-                    findings = list(findings) + ["Execution requested a human decision instead of finishing the slice."]
-                    accepted = False
-            else:
-                findings = list(findings) + ["Execution output payload was missing or malformed."]
-                accepted = False
-            if not design_contract:
-                audit_status = "replan_design"
-                findings = ["Execution ran without a usable design contract."]
-            elif accepted:
-                audit_status = "accepted"
-            else:
-                audit_status = "reopen_execution"
-            artifact_path = self._artifact_path(turn, "verdict")
-            _write_json(
-                artifact_path,
-                {
-                    "audit_status": audit_status,
-                    "accepted": audit_status == "accepted",
-                    "findings": findings,
-                    "verification_commands": verification_commands,
-                    "verification_runs": verification_runs,
-                    "design_contract": design_contract,
-                    "recorded_at": utc_now(),
-                },
-            )
-            return {
-                "status": audit_status,
-                "summary": {
-                    "accepted": "Audit accepted the current round.",
-                    "reopen_execution": "Audit reopened the round and returned it to execution.",
-                    "replan_design": "Audit requested a new design contract before execution can continue.",
-                }[audit_status],
-                "artifacts": [str(artifact_path)],
-                "audit_status": audit_status,
-                "findings": findings,
-                "design_contract": design_contract,
-                "verification_commands": verification_commands,
-            }
-
-        if agent_id == self.cleanup_agent_id:
-            cleanup_mode = coerce_str(inputs.get("cleanup_mode")).strip() or "round-close"
-            runtime_actions = _cleanup_runtime_temp_files(self.paths.harness_root)
-            repo_hygiene_findings = _project_hygiene_findings(project_root) if cleanup_mode == "maintenance" else []
-            stale_turn_identity = bool(turn.state.get("cycle_id") or turn.state.get("sequence"))
-            stale_pending_gate = False
-            pending_gate_id = coerce_str(turn.state.get("pending_gate_id")).strip()
-            if cleanup_mode == "recovery" and pending_gate_id:
-                try:
-                    turn.communication_store.get_gate(pending_gate_id)
-                except KeyError:
-                    stale_pending_gate = True
-            artifact_path = self._artifact_path(turn, cleanup_mode)
-            _write_json(
-                artifact_path,
-                {
-                    "cleanup_mode": cleanup_mode,
-                    "cleanup_reason": inputs.get("cleanup_reason", ""),
-                    "resume_after_cleanup": inputs.get("resume_after_cleanup", ""),
-                    "runtime_cleanup_actions": runtime_actions,
-                    "repo_hygiene_findings": repo_hygiene_findings,
-                    "stale_turn_identity": stale_turn_identity,
-                    "stale_pending_gate": stale_pending_gate,
-                    "follow_up_required": bool(repo_hygiene_findings),
-                    "recorded_at": utc_now(),
-                },
-            )
-            return {
-                "status": "completed",
-                "summary": f"Cleanup completed in {cleanup_mode} mode.",
-                "cleanup_mode": cleanup_mode,
-                "follow_up_required": bool(repo_hygiene_findings),
-                "artifacts": [str(artifact_path)],
-            }
-
-        return {
-            "status": "completed",
-            "summary": f"Processed {agent_id}.",
-            "artifacts": [],
-        }
+        return _execute_scheduler_turn(
+            self,
+            turn,
+            new_id=_new_id,
+            preferred_planning_doc=_preferred_planning_doc,
+            design_contract_from_docs=_design_contract_from_docs,
+            contract_for_supervisor_decision=_contract_for_supervisor_decision,
+            count_sequence_items=_count_sequence_items,
+            cleanup_runtime_temp_files=_cleanup_runtime_temp_files,
+            project_hygiene_findings=_project_hygiene_findings,
+            launch_execution_subagent=_launch_execution_subagent,
+            run_verification_command=_run_verification_command,
+            verification_acceptance_from_runs=_verification_acceptance_from_runs,
+            verification_scope_findings=_verification_scope_findings,
+            verification_specs=_verification_specs,
+        )
 
     def _record_result(self, agent_id: str, result: Mapping[str, Any]) -> None:
         latest_reports = self._latest_reports()
@@ -2355,30 +1990,12 @@ class HarnessScheduler:
             self.mission.status = "waiting_human"
         self._save_runtime()
 
-    def _open_supervisor_brief(self, brief: Mapping[str, Any], *, blocked_agent: str) -> None:
-        self.state.extra["blocked_agent"] = blocked_agent
-        self.state.extra["resume_agent"] = blocked_agent
-        self._set_communication_brief(dict(brief))
-        self._set_latest_human_reply(None)
-        if self.communication_agent_id:
-            self.state.active_agent = self.communication_agent_id
-            self._set_runtime_status("running")
-            self.mission.status = "active"
-        else:
-            gate = self.communication_store.open_gate(
-                title=coerce_str(brief.get("title"), "Decision gate").strip() or "Decision gate",
-                prompt=self._render_communication_prompt(brief),
-                source="supervisor",
-                severity=coerce_str(brief.get("severity"), "decision_gate").strip() or "decision_gate",
-                context=json.dumps(dict(brief), ensure_ascii=False),
-            )
-            self.state.extra["pending_gate_id"] = gate["id"]
-            self.state.active_agent = ""
-            self._set_runtime_status("waiting_human")
-            self.mission.status = "waiting_human"
-        self._save_runtime()
-
-    def _open_execution_stall_gate(self, report: Mapping[str, Any], *, repeat_count: int) -> None:
+    def _build_execution_retry_brief(
+        self,
+        report: Mapping[str, Any],
+        *,
+        reopen_streak: int,
+    ) -> dict[str, Any]:
         design_contract = report.get("design_contract", {})
         if not isinstance(design_contract, Mapping):
             design_contract = {}
@@ -2386,54 +2003,18 @@ class HarnessScheduler:
         if not isinstance(selected_phase, Mapping):
             selected_phase = {}
         findings = _normalize_text_list(report.get("findings", []))
-        brief = {
-            "decision_id": _new_id("decision"),
-            "title": "Execution is stuck on the current project slice",
-            "question": (
-                "Supervisor saw the same target-project verification failures "
-                f"{repeat_count} time(s) while executing {coerce_str(selected_phase.get('title')).strip() or 'the current slice'}. "
-                "How should the harness proceed?"
-            ),
-            "severity": "goal_conflict",
-            "why_not_auto_answered": (
-                "Execution keeps producing the same repository-level failures and no new implementation evidence."
-            ),
-            "source_ref": coerce_str(design_contract.get("selected_primary_doc")).strip(),
-            "current_context": {
-                "design_contract": dict(design_contract),
-                "findings": findings,
-                "repeat_count": repeat_count,
-            },
-            "options": [
-                {
-                    "label": "Replan before another execution attempt",
-                    "value": "replan",
-                    "description": "Send the slice back to design with new constraints or a different target.",
-                },
-                {
-                    "label": "Continue current slice after I fix the blocker",
-                    "value": "continue",
-                    "description": "Keep the current slice, but wait for a concrete environment or implementation fix first.",
-                },
-            ],
-            "tradeoffs": findings[:5],
-            "supervisor_recommendation": (
-                "Replan the slice or provide a concrete environment/implementation constraint before another run."
-            ),
-            "agent_positions": [
-                {
-                    "agent": "audit",
-                    "position": "Audit keeps reopening because the same verification findings remain unresolved.",
-                },
-                {
-                    "agent": "execution",
-                    "position": "Execution can rerun the target-project checks, but it does not have new implementation evidence to change the result.",
-                },
-            ],
-            "required_reply_shape": "Choose replan/continue and include any concrete constraint or environment fix.",
-            "blocked_agent": self.design_agent_id or "design",
+        phase_title = coerce_str(selected_phase.get("title")).strip() or "the current slice"
+        return {
+            "brief_id": _new_id("execution-retry"),
+            "decision": "retry_execution",
+            "slice_key": coerce_str(design_contract.get("slice_key")).strip(),
+            "phase_title": phase_title,
+            "findings": findings,
+            "reopen_streak": reopen_streak,
+            "design_contract": dict(design_contract),
+            "created_at": utc_now(),
+            "summary": f"Retry {phase_title} after audit findings are addressed inside the assigned worktree.",
         }
-        self._open_supervisor_brief(brief, blocked_agent=self.design_agent_id or self._default_work_entry_agent())
 
     def _auto_replan_stalled_slice(self, report: Mapping[str, Any], *, repeat_count: int) -> None:
         design_contract = report.get("design_contract", {})
@@ -2477,6 +2058,7 @@ class HarnessScheduler:
         self.state.extra.pop("pending_gate_id", None)
         self.state.extra.pop("blocked_agent", None)
         self.state.extra.pop("resume_agent", None)
+        self._set_pending_execution_brief(None)
         self._set_communication_brief(None)
         self._set_latest_human_reply(None)
         self.state.active_agent = self.design_agent_id or self._default_work_entry_agent()
@@ -2567,17 +2149,79 @@ class HarnessScheduler:
             return
 
         if agent_id == self.design_agent_id:
-            if coerce_str(report.get("design_status")).strip() == "completed":
-                self._complete_mission()
+            design_status = coerce_str(report.get("design_status")).strip()
+            artifacts = report.get("artifacts", [])
+            contract_artifact_path = str(artifacts[-1]) if isinstance(artifacts, list) and artifacts else ""
+            if contract_artifact_path:
+                self._consume_completed_agent(self.design_agent_id or "design", contract_artifact_path)
+            if design_status == "failed" or status == "failed":
+                self.state.active_agent = ""
+                self.mission.status = "failed"
+                self.state.extra["failure_reason"] = "design background worker failed"
+                self._set_runtime_status("failed")
+                self._save_runtime()
                 return
-            self.state.active_agent = self.execution_agent_id or ""
-            if not self.state.active_agent:
+            if design_status in {"launched", "running"}:
+                next_agent = ""
+                if self._completed_execution_queue() and self.audit_agent_id:
+                    next_agent = self.audit_agent_id
+                self.state.active_agent = next_agent
+                self._request_scheduler_yield()
+                self._save_runtime()
+                return
+            if design_status == "completed":
+                if (
+                    self._current_running_execution()
+                    or self._current_running_agent(self.audit_agent_id or "")
+                    or self._completed_execution_queue()
+                ):
+                    self.state.active_agent = self.audit_agent_id if self._completed_execution_queue() and self.audit_agent_id else ""
+                    self._request_scheduler_yield()
+                    self._save_runtime()
+                else:
+                    self._complete_mission()
+                return
+            if self._completed_execution_queue() and self.audit_agent_id:
+                self.state.active_agent = self.audit_agent_id
+                self._save_runtime()
+                return
+            if self._current_running_execution():
+                self.state.active_agent = ""
+                self._request_scheduler_yield()
+            else:
+                self.state.active_agent = self.execution_agent_id or ""
+            if not self.state.active_agent and not self._current_running_execution():
                 self._complete_mission()
             else:
                 self._save_runtime()
             return
 
         if agent_id == self.execution_agent_id:
+            execution_status = coerce_str(report.get("execution_status")).strip()
+            if execution_status == "failed" or status == "failed":
+                self.state.active_agent = ""
+                self.mission.status = "failed"
+                self.state.extra["failure_reason"] = coerce_str(report.get("failure_reason")).strip() or "execution background worker failed"
+                self._set_runtime_status("failed")
+                self._save_runtime()
+                return
+            if execution_status in {"launched", "running"}:
+                self._set_pending_execution_brief(None)
+                next_agent = ""
+                if self._completed_execution_queue() and self.audit_agent_id:
+                    next_agent = self.audit_agent_id
+                elif (
+                    not self._planned_slice_queue()
+                    and not self._prefetch_completed()
+                    and self.design_agent_id
+                    and not self._current_running_agent(self.design_agent_id)
+                ):
+                    next_agent = self.design_agent_id
+                self.state.active_agent = next_agent
+                self._request_scheduler_yield()
+                self._save_runtime()
+                return
+            self._set_pending_execution_brief(None)
             self.state.active_agent = self.audit_agent_id or ""
             if not self.state.active_agent:
                 self._complete_mission()
@@ -2586,9 +2230,38 @@ class HarnessScheduler:
             return
 
         if agent_id == self.audit_agent_id:
+            if coerce_str(report.get("audit_status")).strip() in {"launched", "running"}:
+                next_agent = ""
+                if (
+                    self._current_running_execution()
+                    and not self._planned_slice_queue()
+                    and not self._prefetch_completed()
+                    and self.design_agent_id
+                    and not self._current_running_agent(self.design_agent_id)
+                ):
+                    next_agent = self.design_agent_id
+                self.state.active_agent = next_agent
+                self._request_scheduler_yield()
+                self._save_runtime()
+                return
             audit_status = coerce_str(report.get("audit_status") or status).strip() or status
+            if audit_status == "failed" or status == "failed":
+                self.state.active_agent = ""
+                self.mission.status = "failed"
+                self.state.extra["failure_reason"] = "audit background worker failed"
+                self._set_runtime_status("failed")
+                self._save_runtime()
+                return
             artifacts = report.get("artifacts", [])
-            audit_payload = self._load_json(str(artifacts[0])) if isinstance(artifacts, list) and artifacts else {}
+            audit_artifact_path = str(artifacts[-1]) if isinstance(artifacts, list) and artifacts else ""
+            if audit_artifact_path:
+                self._consume_completed_agent(self.audit_agent_id or "audit", audit_artifact_path)
+            audit_payload = self._load_json(audit_artifact_path) if audit_artifact_path else {}
+            execution_artifact_path = ""
+            if isinstance(audit_payload, Mapping):
+                execution_artifact_path = coerce_str(audit_payload.get("execution_artifact_path")).strip()
+            if execution_artifact_path:
+                self._consume_completed_execution(execution_artifact_path)
             audit_design_contract = (
                 dict(audit_payload.get("design_contract", {}))
                 if isinstance(audit_payload, Mapping) and isinstance(audit_payload.get("design_contract", {}), Mapping)
@@ -2601,6 +2274,20 @@ class HarnessScheduler:
             )
             if audit_status == "accepted":
                 self._clear_audit_reopen_tracking()
+                self._set_pending_execution_brief(None)
+                self.state.extra.pop("last_failure_findings", None)
+                self.state.extra.pop("failure_reason", None)
+                try:
+                    self._promote_execution_worktree(audit_design_contract)
+                    self._release_execution_worktree(audit_design_contract)
+                except WorktreeError as exc:
+                    self.state.active_agent = ""
+                    self.mission.status = "failed"
+                    self.state.extra["failure_reason"] = f"supervisor could not promote the accepted worktree: {exc}"
+                    self.state.extra["last_failure_findings"] = [str(exc)]
+                    self._set_runtime_status("failed")
+                    self._save_runtime()
+                    return
                 self._record_completed_slice(audit_design_contract)
                 if self.cleanup_agent_id:
                     self._schedule_cleanup(
@@ -2619,6 +2306,9 @@ class HarnessScheduler:
                 return
             if audit_status == "replan_design":
                 self._clear_audit_reopen_tracking()
+                self._set_pending_execution_brief(None)
+                self.state.extra["last_failure_findings"] = audit_findings
+                self._release_execution_worktree(audit_design_contract)
                 self.state.active_agent = self.design_agent_id or self._default_work_entry_agent()
                 self._save_runtime()
                 return
@@ -2626,15 +2316,23 @@ class HarnessScheduler:
                 audit_findings,
                 design_contract=audit_design_contract,
             )
+            self.state.extra["last_failure_findings"] = audit_findings
             if (
                 coerce_str(audit_design_contract.get("execution_scope")).strip() == "external_project"
                 and reopen_streak >= 2
             ):
+                self._release_execution_worktree(audit_design_contract)
                 self._auto_replan_stalled_slice(
                     audit_payload if isinstance(audit_payload, Mapping) else report,
                     repeat_count=reopen_streak,
                 )
                 return
+            self._set_pending_execution_brief(
+                self._build_execution_retry_brief(
+                    audit_payload if isinstance(audit_payload, Mapping) else report,
+                    reopen_streak=reopen_streak,
+                )
+            )
             self.state.active_agent = self.execution_agent_id or self._default_work_entry_agent()
             self._save_runtime()
             return
@@ -2705,6 +2403,7 @@ class HarnessScheduler:
 
     def run_until_stable(self, *, max_turns: int = 20) -> SchedulerResult:
         steps: list[dict[str, Any]] = []
+        self.state.extra.pop("scheduler_yield", None)
         previous_digest = coerce_str(self.mission.extra.get("doc_digest")).strip()
         self._refresh_doc_bundle()
         self._resume_for_doc_change(previous_digest)
@@ -2723,8 +2422,12 @@ class HarnessScheduler:
             if self._runtime_status() in {"waiting_human", "completed", "failed"}:
                 break
             self._prepare_next_agent()
-            agent_id = self.state.active_agent or self._default_work_entry_agent()
+            agent_id = self.state.active_agent
+            if not agent_id:
+                break
             steps.extend(self._run_agent_until_stable(agent_id))
+            if self._consume_scheduler_yield():
+                break
         return SchedulerResult(
             status=self._runtime_status(),
             steps=steps,

@@ -19,6 +19,7 @@ ANSWERS_DIR_NAME = "answers"
 ARTIFACTS_DIR_NAME = "artifacts"
 LOCKS_DIR_NAME = "locks"
 LAUNCHERS_DIR_NAME = "launchers"
+WORKTREES_DIR_NAME = "worktrees"
 DEFAULT_DECISION_GATE_TAGS = (
     "architecture_change",
     "destructive_action",
@@ -42,6 +43,7 @@ class RuntimePaths:
     artifacts_dir: Path
     locks_dir: Path
     launchers_dir: Path
+    worktrees_dir: Path
 
 
 @dataclass(slots=True)
@@ -259,6 +261,7 @@ def runtime_paths(memory_root: Path | str) -> RuntimePaths:
         artifacts_dir=harness_root / ARTIFACTS_DIR_NAME,
         locks_dir=harness_root / LOCKS_DIR_NAME,
         launchers_dir=harness_root / LAUNCHERS_DIR_NAME,
+        worktrees_dir=harness_root / WORKTREES_DIR_NAME,
     )
 
 
@@ -272,6 +275,7 @@ def ensure_runtime_layout(memory_root: Path | str) -> RuntimePaths:
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
     paths.locks_dir.mkdir(parents=True, exist_ok=True)
     paths.launchers_dir.mkdir(parents=True, exist_ok=True)
+    paths.worktrees_dir.mkdir(parents=True, exist_ok=True)
     return paths
 
 

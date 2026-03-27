@@ -91,8 +91,6 @@ def _render_option_buttons(gate_id: str, brief: dict[str, Any]) -> str:
             )
         )
     return "".join(forms)
-
-
 def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = "") -> str:
     runtime = server.bridge.snapshot()
     communication = server.communication_store.snapshot()
@@ -110,6 +108,10 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         "pending_gate_id": str(state.get("pending_gate_id") or ""),
         "gate_id": str(gate.get("id") or "") if isinstance(gate, dict) else "",
         "gate_status": str(gate.get("status") or "") if isinstance(gate, dict) else "",
+        "running_agents": runtime.get("running_agents", []) if isinstance(runtime, dict) else [],
+        "queued_slices": runtime.get("queued_slices", []) if isinstance(runtime, dict) else [],
+        "recent_events": runtime.get("recent_events", []) if isinstance(runtime, dict) else [],
+        "agent_statuses": runtime.get("agent_statuses", []) if isinstance(runtime, dict) else [],
     }
     gate_html = ""
     if gate:
@@ -206,6 +208,16 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
         gap: 0.75rem;
       }}
+      .monitor-lists {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+        gap: 0.75rem;
+      }}
+      .agent-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+        gap: 0.75rem;
+      }}
       .monitor-card {{
         background: #fffdf9;
         border: 1px solid var(--line);
@@ -217,6 +229,103 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         font-size: 0.82rem;
         color: var(--muted);
         margin-bottom: 0.3rem;
+      }}
+      .list-card {{
+        background: #fffdf9;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 0.9rem 1rem;
+      }}
+      .list-card strong {{
+        display: block;
+        font-size: 0.82rem;
+        color: var(--muted);
+        margin-bottom: 0.5rem;
+      }}
+      .list-card ul {{
+        margin: 0;
+        padding-left: 1rem;
+      }}
+      .list-card li {{
+        margin: 0.35rem 0;
+        color: var(--muted);
+        line-height: 1.45;
+      }}
+      .agent-card {{
+        background: #fffdf9;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 0.9rem 1rem;
+      }}
+      .agent-card .agent-name {{
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+      }}
+      .agent-card .agent-status {{
+        color: var(--accent);
+        font-size: 0.85rem;
+        margin-bottom: 0.45rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }}
+      .agent-card p {{
+        margin: 0.25rem 0;
+        color: var(--muted);
+      }}
+      .agent-state-chips {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin: 0.55rem 0 0.45rem;
+      }}
+      .agent-state-chip {{
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        border-radius: 999px;
+        padding: 0.28rem 0.55rem;
+        background: #f5ede1;
+        color: var(--ink);
+        font-size: 0.78rem;
+        line-height: 1;
+      }}
+      .agent-state-chip .label {{
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-size: 0.72rem;
+      }}
+      .agent-fields {{
+        display: grid;
+        gap: 0.45rem;
+        margin-top: 0.55rem;
+      }}
+      .agent-field {{
+        background: #fffaf4;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 0.5rem 0.65rem;
+      }}
+      .agent-field .label {{
+        display: block;
+        color: var(--muted);
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.2rem;
+      }}
+      .agent-field .value {{
+        color: var(--ink);
+        line-height: 1.4;
+        word-break: break-word;
+      }}
+      .agent-card ul {{
+        margin: 0.45rem 0 0;
+        padding-left: 1rem;
+      }}
+      .agent-card li {{
+        margin: 0.2rem 0;
+        color: var(--muted);
       }}
       .eyebrow {{
         text-transform: uppercase;
@@ -346,6 +455,27 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         </div>
         <p class="monitor-note" id="monitor-note">This page polls the runtime in the background. Draft replies are kept in your browser and will not disappear while you are typing.</p>
       </section>
+      <section class="hero monitor">
+        <div class="eyebrow">Agent Status</div>
+        <div class="agent-grid" id="agent-statuses"></div>
+      </section>
+      <section class="hero monitor">
+        <div class="eyebrow">Parallel Work</div>
+        <div class="monitor-lists">
+          <div class="list-card">
+            <strong>Running Agents</strong>
+            <ul id="running-agents-list"></ul>
+          </div>
+          <div class="list-card">
+            <strong>Queued Work</strong>
+            <ul id="queued-slices-list"></ul>
+          </div>
+          <div class="list-card">
+            <strong>Recent Events</strong>
+            <ul id="recent-events-list"></ul>
+          </div>
+        </div>
+      </section>
       {gate_html}
       <p class="footer">The page no longer hard-refreshes while you are typing. If the gate changes mid-draft, your text stays in place.</p>
     </main>
@@ -385,8 +515,136 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         const node = document.getElementById(id);
         if (node) node.textContent = value;
       }};
+      const renderList = (id, items, formatter) => {{
+        const node = document.getElementById(id);
+        if (!node) return;
+        node.innerHTML = "";
+        const list = Array.isArray(items) ? items : [];
+        if (!list.length) {{
+          const li = document.createElement("li");
+          li.textContent = "none";
+          node.appendChild(li);
+          return;
+        }}
+        list.forEach((item) => {{
+          const li = document.createElement("li");
+          li.textContent = formatter(item || {{}});
+          node.appendChild(li);
+        }});
+      }};
+      const renderAgentStatuses = (items) => {{
+        const node = document.getElementById("agent-statuses");
+        if (!node) return;
+        node.innerHTML = "";
+        const list = Array.isArray(items) ? items : [];
+        if (!list.length) {{
+          const empty = document.createElement("div");
+          empty.className = "agent-card";
+          empty.innerHTML = "<div class='agent-name'>No agent status available</div>";
+          node.appendChild(empty);
+          return;
+        }}
+        list.forEach((item) => {{
+          const card = document.createElement("div");
+          card.className = "agent-card";
+          const name = document.createElement("div");
+          name.className = "agent-name";
+          name.textContent = String(item.name || item.id || "Agent");
+          card.appendChild(name);
+
+          const status = document.createElement("div");
+          status.className = "agent-status";
+          status.textContent = String(item.status || "idle");
+          card.appendChild(status);
+
+          const summary = document.createElement("p");
+          summary.textContent = String(item.summary || "");
+          card.appendChild(summary);
+
+          const chipRow = document.createElement("div");
+          chipRow.className = "agent-state-chips";
+          ["queued", "running", "waiting", "blocked"].forEach((field) => {{
+            if (!Object.prototype.hasOwnProperty.call(item, field)) return;
+            const value = item[field];
+            if (value === undefined || value === null || value === "" || value === false) return;
+            const chip = document.createElement("span");
+            chip.className = "agent-state-chip";
+            const label = document.createElement("span");
+            label.className = "label";
+            label.textContent = field;
+            chip.appendChild(label);
+            const chipValue = document.createElement("span");
+            chipValue.textContent = value === true ? "active" : String(value);
+            chip.appendChild(chipValue);
+            chipRow.appendChild(chip);
+          }});
+          if (chipRow.childNodes.length) {{
+            card.appendChild(chipRow);
+          }}
+
+          const fieldList = document.createElement("div");
+          fieldList.className = "agent-fields";
+          [
+            ["worktree", "Worktree"],
+            ["current_slice", "Current slice"],
+            ["current_brief", "Current brief"],
+          ].forEach(([field, label]) => {{
+            if (!Object.prototype.hasOwnProperty.call(item, field)) return;
+            const value = item[field];
+            const normalized = Array.isArray(value)
+              ? value.filter(Boolean).map((entry) => String(entry).trim()).join(", ")
+              : String(value || "").trim();
+            if (!normalized) return;
+            const fieldCard = document.createElement("div");
+            fieldCard.className = "agent-field";
+            const fieldLabel = document.createElement("span");
+            fieldLabel.className = "label";
+            fieldLabel.textContent = label;
+            const fieldValue = document.createElement("div");
+            fieldValue.className = "value";
+            fieldValue.textContent = normalized;
+            fieldCard.appendChild(fieldLabel);
+            fieldCard.appendChild(fieldValue);
+            fieldList.appendChild(fieldCard);
+          }});
+          if (fieldList.childNodes.length) {{
+            card.appendChild(fieldList);
+          }}
+
+          if (Array.isArray(item.details) && item.details.length) {{
+            const details = document.createElement("ul");
+            item.details.forEach((detail) => {{
+              const li = document.createElement("li");
+              li.textContent = String(detail);
+              details.appendChild(li);
+            }});
+            card.appendChild(details);
+          }}
+          node.appendChild(card);
+        }});
+      }};
+      const refreshStructuredMonitor = (monitor) => {{
+        renderAgentStatuses(monitor.agent_statuses || []);
+        renderList("running-agents-list", monitor.running_agents || [], (item) => {{
+          const id = String(item.id || "agent");
+          const status = String(item.status || "running");
+          const phase = String(item.phase_title || item.slice_key || "").trim();
+          return phase ? `${{id}}: ${{status}} - ${{phase}}` : `${{id}}: ${{status}}`;
+        }});
+        renderList("queued-slices-list", monitor.queued_slices || [], (item) => {{
+          const status = String(item.status || "queued");
+          const phase = String(item.phase_title || item.slice_key || "slice");
+          return `${{status}} - ${{phase}}`;
+        }});
+        renderList("recent-events-list", monitor.recent_events || [], (item) => {{
+          const when = String(item.recorded_at || "");
+          const summary = String(item.summary || item.kind || "event");
+          return when ? `${{when}} - ${{summary}}` : summary;
+        }});
+      }};
       let lastGateId = INITIAL_MONITOR.gate_id || "";
       let lastRuntimeStatus = INITIAL_MONITOR.runtime_status || "";
+      refreshStructuredMonitor(INITIAL_MONITOR);
       const hasDraft = () => Boolean(messageBox && messageBox.value.trim());
       const refreshMonitor = async () => {{
         try {{
@@ -404,6 +662,12 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
           updateText("runtime-round", String(state.current_round || mission.round || 0));
           updateText("active-agent", String(state.active_agent || "idle"));
           updateText("pending-gate", String(state.pending_gate_id || (gate && gate.id) || "none"));
+          refreshStructuredMonitor({{
+            agent_statuses: runtime.agent_statuses || [],
+            running_agents: runtime.running_agents || [],
+            queued_slices: runtime.queued_slices || [],
+            recent_events: runtime.recent_events || [],
+          }});
           const nextGateId = gate ? String(gate.id || "") : "";
           const nextRuntimeStatus = String(state.status || mission.status || "unknown");
           const gateChanged = nextGateId !== lastGateId;

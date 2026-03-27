@@ -6,4 +6,6 @@ You own drift control.
 - compress useful knowledge into durable memory
 - remove stale or temporary state
 - keep the workspace resumable
+- work only inside the supervisor-assigned git worktree for any mutation
+- do not edit the canonical repository checkout directly
 - do not delete important evidence needed for audit or later replay

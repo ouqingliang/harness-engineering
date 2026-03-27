@@ -10,10 +10,7 @@ from urllib.parse import urlencode
 
 from lib.communication_api import CommunicationStore, create_server, pending_gates
 from lib.runner_bridge import RunnerBridge, run_agent
-from lib.runtime_state import HarnessConfig, RuntimeState, ensure_runtime_root, save_mission, save_state, utc_now
-from lib.scheduler import HarnessScheduler
 from lib.supervisor_bridge import SupervisorBridge
-from main import build_or_update_mission, load_all_specs, validate_specs
 
 
 def _request_json(port: int, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
@@ -88,39 +85,33 @@ class RunnerBridgeTests(unittest.TestCase):
 
 class SupervisorBridgeTests(unittest.TestCase):
     def test_snapshot_reports_supervisor_runtime_state(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            doc_root = root / "docs"
-            doc_root.mkdir()
-            (doc_root / "README.md").write_text("# Demo\n\nSupervisor snapshot.\n", encoding="utf-8")
+        class FakeScheduler:
+            specs = [
+                {"id": "design", "name": "Design Agent", "order": 20, "dependencies": (), "title": "Design the next approved slice", "goal": "Define the next slice."}
+            ]
 
-            memory_root = root / "memory"
-            paths = ensure_runtime_root(memory_root)
-            mission = build_or_update_mission(
-                HarnessConfig.from_mapping({"memory_root": str(memory_root), "doc_root": str(doc_root), "goal": "snapshot"}),
-                doc_root=doc_root,
-            )
-            state = RuntimeState(
-                active_agent="design",
-                last_successful_agent="",
-                retry_count=0,
-                last_run_at=utc_now(),
-                current_round=0,
-                extra={"status": "running"},
-            )
-            save_mission(paths.memory_root, mission)
-            save_state(paths.memory_root, state)
+            def snapshot(self) -> dict:
+                return {
+                    "runtime_root": "runtime-root",
+                    "mission": {"goal": "snapshot"},
+                    "state": {"active_agent": "design"},
+                    "agent_statuses": [{"id": "design", "name": "Design Agent", "status": "planning"}],
+                    "running_agents": [],
+                    "queued_slices": [],
+                    "recent_events": [],
+                }
 
-            specs = load_all_specs()
-            validate_specs(specs)
-            scheduler = HarnessScheduler(specs=specs, paths=paths, mission=mission, state=state)
-            bridge = SupervisorBridge(scheduler)
+        scheduler = FakeScheduler()
+        bridge = SupervisorBridge(scheduler)
 
-            snapshot = bridge.snapshot()
+        snapshot = bridge.snapshot()
 
-            self.assertEqual(snapshot["mission"]["goal"], "snapshot")
-            self.assertEqual(snapshot["state"]["active_agent"], "design")
-            self.assertTrue(any(agent["id"] == "design" for agent in snapshot["agents"]))
+        self.assertEqual(snapshot["mission"]["goal"], "snapshot")
+        self.assertEqual(snapshot["state"]["active_agent"], "design")
+        self.assertIn("agent_statuses", snapshot)
+        self.assertIn("running_agents", snapshot)
+        self.assertIn("queued_slices", snapshot)
+        self.assertTrue(any(agent["id"] == "design" for agent in snapshot["agents"]))
 
 
 class CommunicationServerTests(unittest.TestCase):
@@ -135,6 +126,45 @@ class CommunicationServerTests(unittest.TestCase):
                         "runtime_root": str(runtime_root),
                         "mission": {"status": "active"},
                         "state": {"active_agent": "design"},
+                        "agent_statuses": [
+                            {
+                                "id": "design",
+                                "name": "Design Agent",
+                                "status": "planning",
+                                "summary": "Preparing the current design contract.",
+                                "queued": 2,
+                                "worktree": "C:/tmp/design-worktree",
+                                "current_slice": "Phase 1",
+                                "current_brief": "Refine the contract before execution.",
+                                "details": [],
+                            },
+                            {
+                                "id": "execution",
+                                "name": "Execution Agent",
+                                "status": "running",
+                                "summary": "Executing approved slices in the background.",
+                                "running": 1,
+                                "worktree": "C:/tmp/execution-worktree",
+                                "current_slice": "Phase 2",
+                                "current_brief": "Implement the approved slice in the worktree.",
+                                "details": ["Phase 2"],
+                            },
+                            {
+                                "id": "audit",
+                                "name": "Audit Agent",
+                                "status": "waiting",
+                                "summary": "Waiting for supervisor routing.",
+                                "waiting": "queued for supervisor",
+                                "blocked": True,
+                                "worktree": "C:/tmp/audit-worktree",
+                                "current_slice": "Phase 2",
+                                "current_brief": "Audit verdict is pending.",
+                                "details": [],
+                            },
+                        ],
+                        "running_agents": [{"id": "execution", "status": "running", "phase_title": "Phase 2"}],
+                        "queued_slices": [{"status": "prefetched", "phase_title": "Phase 3"}],
+                        "recent_events": [{"recorded_at": "2026-03-26T00:00:00Z", "summary": "Execution launched"}],
                         "agents": [{"id": "design"}],
                     }
 
@@ -150,6 +180,7 @@ class CommunicationServerTests(unittest.TestCase):
                 status, payload = _request_json(port, "GET", "/runtime")
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["runtime"]["state"]["active_agent"], "design")
+                self.assertEqual(payload["runtime"]["agent_statuses"][0]["id"], "design")
 
                 status, payload = _request_json(port, "POST", "/communication/messages", {"sender": "human", "body": "hello communication agent"})
                 self.assertEqual(status, 200)
@@ -168,6 +199,25 @@ class CommunicationServerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertIn("Harness Monitor", body)
                 self.assertIn("Draft replies are kept in your browser", body)
+                self.assertIn("Agent Status", body)
+                self.assertIn("Design Agent", body)
+                self.assertIn("Running Agents", body)
+                self.assertIn("Queued Work", body)
+                self.assertIn("queued", body)
+                self.assertIn("running", body)
+                self.assertIn("waiting", body)
+                self.assertIn("blocked", body)
+                self.assertIn("Worktree", body)
+                self.assertIn("Current slice", body)
+                self.assertIn("Current brief", body)
+                self.assertIn("C:/tmp/design-worktree", body)
+                self.assertIn("C:/tmp/execution-worktree", body)
+                self.assertIn("C:/tmp/audit-worktree", body)
+                self.assertIn("Phase 1", body)
+                self.assertIn("Phase 2", body)
+                self.assertIn("Refine the contract before execution.", body)
+                self.assertIn("Implement the approved slice in the worktree.", body)
+                self.assertIn("Audit verdict is pending.", body)
                 self.assertIn("Need decision", body)
                 self.assertIn("Approve the mainline?", body)
 
