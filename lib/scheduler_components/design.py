@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import sys
 from typing import Any, Mapping
 
 from ..runtime_state import coerce_str, utc_now
+from .background_runtime import _process_identity_token, save_launcher_state
 from .support import _normalize_text_list, _write_json
 
 
@@ -28,11 +31,20 @@ def _write_launcher_state(
     if status == "running":
         payload["last_cycle_id"] = request_path.parent.name
         payload["started_at"] = started_at
+        payload["heartbeat_at"] = utc_now()
+        payload["pid"] = os.getpid()
+        payload["pid_executable"] = sys.executable
+        payload["pid_identity"] = _process_identity_token(os.getpid())
     else:
         payload["completed_at"] = utc_now()
         if exit_code is not None:
             payload["last_exit_code"] = exit_code
-    _write_json(launcher_state_path, payload)
+    save_launcher_state(
+        launcher_state_path=launcher_state_path,
+        request_path=request_path,
+        result_path=result_path,
+        payload=payload,
+    )
 
 
 def _design_result_from_request(request_payload: Mapping[str, Any]) -> dict[str, Any]:

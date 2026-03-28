@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import subprocess
@@ -8,6 +9,9 @@ from typing import Any, Mapping
 
 from ..runtime_state import coerce_int, coerce_str, utc_now
 from .support import HARNESS_ROOT, _git_status_snapshot, _write_json
+
+PID_MISMATCH_FAILURE_GRACE_SECONDS = 120
+LAUNCHER_HEARTBEAT_STALE_SECONDS = 20
 
 
 def _read_launcher_state(path: Path) -> dict[str, Any]:
@@ -52,6 +56,34 @@ def _launcher_failure_payload(
         "pre_git_status": _git_status_snapshot(workspace_root),
         "post_git_status": _git_status_snapshot(workspace_root),
     }
+
+
+def save_launcher_state(
+    *,
+    launcher_state_path: Path,
+    request_path: Path,
+    result_path: Path,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(payload)
+    status = coerce_str(normalized.get("status")).strip().lower()
+    existing_state = _read_launcher_state(launcher_state_path)
+    if status == "running" and _same_launcher_request(existing_state, request_path=request_path, result_path=result_path):
+        for key in (
+            "pid",
+            "pid_executable",
+            "pid_identity",
+            "heartbeat_at",
+            "agent_id",
+            "active_run_id",
+            "last_cycle_id",
+            "started_at",
+        ):
+            existing_value = existing_state.get(key)
+            if existing_value not in (None, "") and key not in normalized:
+                normalized[key] = existing_value
+    _write_json(launcher_state_path, normalized)
+    return normalized
 
 
 def launch_background_agent(
@@ -125,7 +157,10 @@ def launch_background_agent(
         "last_result_path": str(result_path),
         "last_cycle_id": request_path.parent.name,
         "started_at": started_at,
+        "heartbeat_at": utc_now(),
         "pid": process.pid,
+        "pid_executable": sys.executable,
+        "pid_identity": _process_identity_token(process.pid),
     }
     existing_state = _read_launcher_state(launcher_state_path)
     if _same_launcher_request(existing_state, request_path=request_path, result_path=result_path):
@@ -134,13 +169,73 @@ def launch_background_agent(
             launch_state = dict(existing_state)
         else:
             launch_state = dict(existing_state) | launch_state
-    _write_json(launcher_state_path, launch_state)
+    save_launcher_state(
+        launcher_state_path=launcher_state_path,
+        request_path=request_path,
+        result_path=result_path,
+        payload=launch_state,
+    )
     return {
         "ok": True,
         "pid": process.pid,
         "command": command,
         "started_at": started_at,
     }
+
+
+def _parse_utc(text: Any) -> datetime | None:
+    normalized = coerce_str(text).strip()
+    if not normalized:
+        return None
+    try:
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _orphaned_running_reason(path: Path, normalized: Mapping[str, Any]) -> str:
+    if coerce_str(normalized.get("status")).strip().lower() != "running":
+        return ""
+    pid = coerce_int(normalized.get("pid"), 0)
+    if pid > 0:
+        return ""
+    started_at = _parse_utc(normalized.get("started_at"))
+    if started_at is None:
+        return ""
+    if (datetime.now(timezone.utc) - started_at).total_seconds() < 15:
+        return ""
+    missing: list[str] = []
+    active_run_id = coerce_str(normalized.get("active_run_id")).strip()
+    if active_run_id:
+        run_path = path.parent / "runs" / f"{active_run_id}.json"
+        if not run_path.exists():
+            missing.append("launcher run record")
+    result_path = Path(coerce_str(normalized.get("last_result_path")).strip()) if coerce_str(normalized.get("last_result_path")).strip() else None
+    if result_path is None or not result_path.exists():
+        missing.append("result artifact")
+    if not missing:
+        return ""
+    missing_text = ", ".join(missing)
+    return f"background worker no longer has a live pid and is missing {missing_text}"
+
+
+def _running_state_age_seconds(normalized: Mapping[str, Any]) -> float | None:
+    started_at = _parse_utc(normalized.get("started_at"))
+    if started_at is None:
+        return None
+    return (datetime.now(timezone.utc) - started_at).total_seconds()
+
+
+def _elapsed_since(timestamp: Any) -> float | None:
+    parsed = _parse_utc(timestamp)
+    if parsed is None:
+        return None
+    return (datetime.now(timezone.utc) - parsed).total_seconds()
+
+
+def _has_recent_heartbeat(normalized: Mapping[str, Any]) -> bool:
+    heartbeat_age = _elapsed_since(normalized.get("heartbeat_at"))
+    return heartbeat_age is not None and heartbeat_age < LAUNCHER_HEARTBEAT_STALE_SECONDS
 
 
 def load_launcher_status(path: Path) -> dict[str, Any]:
@@ -157,13 +252,47 @@ def load_launcher_status(path: Path) -> dict[str, Any]:
     normalized = dict(payload)
     status = coerce_str(normalized.get("status")).strip().lower()
     pid = coerce_int(normalized.get("pid"), 0)
-    if status == "running" and pid > 0 and not _pid_is_alive(pid):
+    has_recent_heartbeat = _has_recent_heartbeat(normalized)
+    result_path_raw = coerce_str(normalized.get("last_result_path")).strip()
+    result_exists = bool(result_path_raw) and Path(result_path_raw).exists()
+    if status == "running" and result_exists:
+        if coerce_str(normalized.get("pid_mismatch_detected_at")).strip():
+            normalized.pop("pid_mismatch_detected_at", None)
+            _write_json(path, normalized)
+        return normalized
+    if status == "running" and pid > 0 and not _pid_is_alive(pid) and not has_recent_heartbeat:
         normalized["status"] = "failed"
         normalized["active_run_id"] = ""
         normalized["completed_at"] = utc_now()
         normalized["last_exit_code"] = coerce_int(normalized.get("last_exit_code"), -1)
         normalized["stale_reason"] = f"background worker pid {pid} is no longer running"
         _write_json(path, normalized)
+    elif status == "running" and pid > 0 and not _pid_matches_launcher(pid, normalized) and not has_recent_heartbeat:
+        active_run_id = coerce_str(normalized.get("active_run_id")).strip()
+        run_exists = bool(active_run_id) and (path.parent / "runs" / f"{active_run_id}.json").exists()
+        mismatch_detected_at = coerce_str(normalized.get("pid_mismatch_detected_at")).strip()
+        if not mismatch_detected_at:
+            normalized["pid_mismatch_detected_at"] = utc_now()
+            _write_json(path, normalized)
+        elif not result_exists and not run_exists and (_elapsed_since(mismatch_detected_at) or 0) >= PID_MISMATCH_FAILURE_GRACE_SECONDS:
+            normalized["status"] = "failed"
+            normalized["active_run_id"] = ""
+            normalized["completed_at"] = utc_now()
+            normalized["last_exit_code"] = coerce_int(normalized.get("last_exit_code"), -1)
+            normalized["stale_reason"] = f"background worker pid {pid} now belongs to a different process"
+            _write_json(path, normalized)
+    elif status == "running" and coerce_str(normalized.get("pid_mismatch_detected_at")).strip():
+        normalized.pop("pid_mismatch_detected_at", None)
+        _write_json(path, normalized)
+    elif status == "running" and not has_recent_heartbeat:
+        stale_reason = _orphaned_running_reason(path, normalized)
+        if stale_reason:
+            normalized["status"] = "failed"
+            normalized["active_run_id"] = ""
+            normalized["completed_at"] = utc_now()
+            normalized["last_exit_code"] = coerce_int(normalized.get("last_exit_code"), -1)
+            normalized["stale_reason"] = stale_reason
+            _write_json(path, normalized)
     return normalized
 
 
@@ -194,5 +323,102 @@ def _pid_is_alive(pid: int) -> bool:
     except PermissionError:
         return True
     except OSError:
+        return False
+    return True
+
+
+def _process_executable_path(pid: int) -> str:
+    normalized_pid = int(pid)
+    if normalized_pid <= 0:
+        return ""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            buffer_size = 32768
+            buffer = ctypes.create_unicode_buffer(buffer_size)
+            size = ctypes.c_ulong(buffer_size)
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, normalized_pid)
+            if not handle:
+                return ""
+            try:
+                if ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                    return buffer.value
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return ""
+        return ""
+    proc_exe = Path(f"/proc/{normalized_pid}/exe")
+    if proc_exe.exists():
+        try:
+            return str(proc_exe.resolve())
+        except OSError:
+            return ""
+    return ""
+
+
+def _process_identity_token(pid: int) -> str:
+    normalized_pid = int(pid)
+    if normalized_pid <= 0:
+        return ""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+            class FILETIME(ctypes.Structure):
+                _fields_ = [("dwLowDateTime", ctypes.c_ulong), ("dwHighDateTime", ctypes.c_ulong)]
+
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, normalized_pid)
+            if not handle:
+                return ""
+            try:
+                creation = FILETIME()
+                exit_time = FILETIME()
+                kernel = FILETIME()
+                user = FILETIME()
+                if not ctypes.windll.kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(creation),
+                    ctypes.byref(exit_time),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                ):
+                    return ""
+                value = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+                return str(value)
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            return ""
+    proc_stat = Path(f"/proc/{normalized_pid}/stat")
+    if proc_stat.exists():
+        try:
+            fields = proc_stat.read_text(encoding="utf-8").split()
+        except OSError:
+            return ""
+        if len(fields) >= 22:
+            return fields[21]
+    return ""
+
+
+def _pid_matches_launcher(pid: int, payload: Mapping[str, Any]) -> bool:
+    expected_identity = coerce_str(payload.get("pid_identity")).strip()
+    if expected_identity:
+        actual_identity = _process_identity_token(pid)
+        if actual_identity:
+            return actual_identity == expected_identity
+    expected_executable = coerce_str(payload.get("pid_executable")).strip()
+    if not expected_executable:
+        return True
+    actual_executable = _process_executable_path(pid)
+    if not actual_executable:
+        return True
+    expected_name = Path(expected_executable).name.lower()
+    actual_name = Path(actual_executable).name.lower()
+    if expected_name and actual_name and expected_name != actual_name:
         return False
     return True

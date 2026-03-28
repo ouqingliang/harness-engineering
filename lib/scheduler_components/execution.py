@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
 from ..runtime_state import coerce_str, utc_now
-from .background_runtime import launch_background_agent
+from .background_runtime import _process_identity_token, launch_background_agent, save_launcher_state
 from .support import (
     DEFAULT_EXECUTION_OUTPUT,
     HARNESS_ROOT,
@@ -66,6 +68,10 @@ def _execution_prompt(
         selected_phase = {}
     lines = [
         "You are the Harness execution-agent for AIMA-refactor.",
+        "You were dispatched as a subagent to execute a specific already-assigned slice inside an existing harness run.",
+        "This is not a new top-level conversation. Skip startup-only meta workflow and act on the assigned slice immediately.",
+        "The using-superpowers startup skill SUBAGENT-STOP clause applies here.",
+        "Do not load startup/meta skills, re-announce your role, or stop after reading repo instructions.",
         f"Assigned worktree: {workspace_root}",
         f"Canonical project root (supervisor-owned): {canonical_project_root}",
         "Read the required baseline docs first and then implement the current slice.",
@@ -122,8 +128,14 @@ def _execution_prompt(
     if isinstance(supervisor_brief, Mapping) and supervisor_brief:
         findings = _normalize_text_list(supervisor_brief.get("findings", []))
         decision = coerce_str(supervisor_brief.get("decision")).strip()
+        human_reply = coerce_str(supervisor_brief.get("human_reply")).strip()
+        summary = coerce_str(supervisor_brief.get("summary")).strip()
         if decision:
             lines.append(f"- supervisor retry route: {decision}")
+        if summary:
+            lines.append(f"- supervisor brief: {summary}")
+        if human_reply:
+            lines.append(f"- latest human reply: {human_reply}")
         if findings:
             lines.append("- audit findings to address before the next audit:")
             for item in findings[:8]:
@@ -132,6 +144,7 @@ def _execution_prompt(
         [
             "",
             "Execution rules:",
+            "- This prompt already contains the current task. Do not ask for the task again or reply with readiness-only status.",
             "- Treat the assigned worktree as the only writable repository root for this slice.",
             "- Do not edit files under the canonical project root directly.",
             "- Use subagents for code modification work whenever the implementation can be decomposed safely.",
@@ -146,6 +159,98 @@ def _execution_prompt(
         ]
     )
     return "\n".join(lines)
+
+
+def _extract_codex_session_id(*streams: str) -> str:
+    pattern = re.compile(
+        r"\bsession(?:\s+id)?\s*[:=]\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+        re.IGNORECASE,
+    )
+    for stream in streams:
+        match = pattern.search(coerce_str(stream))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _execution_made_task_progress(
+    *,
+    parsed_output: Mapping[str, Any],
+    pre_git_status: Mapping[str, Any] | None,
+    post_git_status: Mapping[str, Any] | None,
+) -> bool:
+    status = coerce_str(parsed_output.get("status")).strip().lower()
+    summary = coerce_str(parsed_output.get("summary")).strip()
+    if status not in {"", "unknown"}:
+        return True
+    if summary:
+        return True
+    if bool(parsed_output.get("needs_human")):
+        return True
+    if _normalize_text_list(parsed_output.get("changed_paths", [])):
+        return True
+    if _normalize_text_list(parsed_output.get("verification_notes", [])):
+        return True
+    if _normalize_text_list(parsed_output.get("notes", [])):
+        return True
+    pre_entries = list(pre_git_status.get("entries", [])) if isinstance(pre_git_status, Mapping) else []
+    post_entries = list(post_git_status.get("entries", [])) if isinstance(post_git_status, Mapping) else []
+    return bool(pre_entries or post_entries)
+
+
+def _session_requested_task_again_without_progress(
+    *,
+    session_id: str,
+    parsed_output: Mapping[str, Any],
+    stdout: str,
+    stderr: str,
+    pre_git_status: Mapping[str, Any] | None,
+    post_git_status: Mapping[str, Any] | None,
+) -> bool:
+    if not coerce_str(session_id).strip():
+        return False
+    if _execution_made_task_progress(
+        parsed_output=parsed_output,
+        pre_git_status=pre_git_status,
+        post_git_status=post_git_status,
+    ):
+        return False
+    combined = f"{coerce_str(stdout)}\n{coerce_str(stderr)}".lower()
+    ready_markers = (
+        "send the first task when you're ready",
+        "send the specific task when you're ready",
+        "send the task you want executed",
+        "provide the task",
+        "provide the specific task",
+        "provide the task, and i'll handle it directly",
+        "provide the task, and i’ll handle it directly",
+        "provide the next task, and i'll handle it directly",
+        "provide the next task, and i’ll handle it directly",
+        "give me the task",
+        "give me the next concrete task",
+        "give me the next concrete task, and i'll execute it end-to-end",
+        "give me the next concrete task, and i’ll execute it end-to-end",
+        "send the first task when you’re ready",
+        "send the specific task when you’re ready",
+        "i'll carry it through here",
+        "i’ll carry it through here",
+        "send the first task when you",
+        "send the specific task when you",
+        "using `using-superpowers` to align",
+        "aligning to the repo and harness role first",
+        "loading the required base skill",
+        "i'll follow the repo instructions and pull in the relevant local skills",
+        "i鈥檒l follow the repo instructions and pull in the relevant local skills",
+        "configured as the harness execution-agent",
+        "i'll follow the local skill rules",
+        "i鈥檒l follow the local skill rules",
+        "aligned with the repo instructions in",
+    )
+    if any(marker in combined for marker in ready_markers):
+        return True
+    # Any schema-empty, zero-progress execution reply should be retried as a
+    # fresh task dispatch instead of being treated as a terminal attempt.
+    return True
 
 
 def _prepare_execution_request(
@@ -176,6 +281,16 @@ def _prepare_execution_request(
         "planning_doc": planning_doc,
         "design_contract": dict(design_contract),
         "supervisor_brief": dict(supervisor_brief) if isinstance(supervisor_brief, Mapping) else {},
+        "resume_session_id": (
+            coerce_str(supervisor_brief.get("resume_session_id")).strip()
+            if isinstance(supervisor_brief, Mapping)
+            else ""
+        ),
+        "execution_artifact_path": (
+            coerce_str(supervisor_brief.get("execution_artifact_path")).strip()
+            if isinstance(supervisor_brief, Mapping)
+            else ""
+        ),
         "prompt": prompt,
         "codex_executable": _find_codex_executable(),
         "schema_path": str(request_path.with_name(request_path.stem + "-schema.json")),
@@ -197,20 +312,27 @@ def _run_execution_subagent_from_saved_request(
     workspace_root = Path(coerce_str(request_payload.get("workspace_root"))).resolve()
     prompt = coerce_str(request_payload.get("prompt")).strip()
     codex_executable = coerce_str(request_payload.get("codex_executable")).strip()
+    resume_session_id = coerce_str(request_payload.get("resume_session_id")).strip()
     started_at = coerce_str(request_payload.get("recorded_at")).strip() or utc_now()
     schema_path = Path(coerce_str(request_payload.get("schema_path")).strip())
     output_path = Path(coerce_str(request_payload.get("output_path")).strip())
     launcher_state_path.parent.mkdir(parents=True, exist_ok=True)
     launcher_run_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_json(
-        launcher_state_path,
-        {
+    save_launcher_state(
+        launcher_state_path=launcher_state_path,
+        request_path=request_path,
+        result_path=result_path,
+        payload={
             "status": "running",
             "active_run_id": launcher_run_path.stem,
             "last_request_path": str(request_path),
             "last_result_path": str(result_path),
             "last_cycle_id": request_path.parent.name,
             "started_at": started_at,
+            "heartbeat_at": utc_now(),
+            "pid": os.getpid(),
+            "pid_executable": sys.executable,
+            "pid_identity": _process_identity_token(os.getpid()),
         },
     )
     if not codex_executable:
@@ -225,11 +347,14 @@ def _run_execution_subagent_from_saved_request(
             "pre_git_status": _git_status_snapshot(workspace_root),
             "post_git_status": _git_status_snapshot(workspace_root),
             "command": [],
+            "session_id": resume_session_id,
         }
         _write_json(result_path, payload)
-        _write_json(
-            launcher_state_path,
-            {
+        save_launcher_state(
+            launcher_state_path=launcher_state_path,
+            request_path=request_path,
+            result_path=result_path,
+            payload={
                 "status": "failed",
                 "active_run_id": "",
                 "last_request_path": str(request_path),
@@ -241,23 +366,37 @@ def _run_execution_subagent_from_saved_request(
         _write_json(launcher_run_path, payload)
         return payload
 
-    schema_path.write_text(
-        json.dumps(_execution_output_schema(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
     pre_git_status = _git_status_snapshot(workspace_root)
-    command = [
-        codex_executable,
-        "exec",
-        prompt,
-        "-C",
-        str(workspace_root),
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--output-schema",
-        str(schema_path),
-        "-o",
-        str(output_path),
-    ]
+    if resume_session_id:
+        command = [
+            codex_executable,
+            "exec",
+            "resume",
+            resume_session_id,
+            prompt,
+            "-C",
+            str(workspace_root),
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-o",
+            str(output_path),
+        ]
+    else:
+        schema_path.write_text(
+            json.dumps(_execution_output_schema(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        command = [
+            codex_executable,
+            "exec",
+            prompt,
+            "-C",
+            str(workspace_root),
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+        ]
     completed = subprocess.run(
         command,
         cwd=str(workspace_root),
@@ -277,6 +416,19 @@ def _run_execution_subagent_from_saved_request(
                 f"Failed to parse {output_path.name} as JSON.",
             ]
     post_git_status = _git_status_snapshot(workspace_root)
+    session_id = _extract_codex_session_id(completed.stdout, completed.stderr) or resume_session_id
+    session_state = (
+        "requested_task_again"
+        if _session_requested_task_again_without_progress(
+            session_id=session_id,
+            parsed_output=parsed_output,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            pre_git_status=pre_git_status,
+            post_git_status=post_git_status,
+        )
+        else "terminal"
+    )
     payload = {
         "ok": completed.returncode == 0,
         "command": command,
@@ -289,12 +441,16 @@ def _run_execution_subagent_from_saved_request(
         "parsed_output": parsed_output,
         "pre_git_status": pre_git_status,
         "post_git_status": post_git_status,
+        "session_id": session_id,
+        "session_state": session_state,
     }
     _write_json(result_path, payload)
     _write_json(launcher_run_path, payload)
-    _write_json(
-        launcher_state_path,
-        {
+    save_launcher_state(
+        launcher_state_path=launcher_state_path,
+        request_path=request_path,
+        result_path=result_path,
+        payload={
             "status": "completed" if payload["ok"] else "failed",
             "active_run_id": "",
             "last_request_path": str(request_path),

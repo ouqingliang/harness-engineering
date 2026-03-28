@@ -211,6 +211,24 @@ def _remap_verification_spec_to_workspace(
     workspace_root: Path,
     canonical_root: Path,
 ) -> dict[str, Any]:
+    def _remap_path_text(text: str) -> str:
+        if not text:
+            return text
+        candidate_path = Path(text)
+        resolved: Path | None = None
+        try:
+            if candidate_path.is_absolute():
+                resolved = candidate_path.resolve()
+        except OSError:
+            resolved = None
+        if resolved is None:
+            return text
+        if same_path(resolved, canonical_root):
+            return str(workspace_root)
+        if path_within(resolved, canonical_root):
+            return str(workspace_root / resolved.relative_to(canonical_root))
+        return text
+
     rewritten = dict(spec)
     cwd_text = coerce_str(rewritten.get("cwd")).strip()
     if cwd_text:
@@ -218,24 +236,14 @@ def _remap_verification_spec_to_workspace(
             cwd = Path(cwd_text).resolve()
         except OSError:
             cwd = None
-        if cwd == canonical_root:
-            rewritten["cwd"] = str(workspace_root)
+        if cwd is not None:
+            if same_path(cwd, canonical_root):
+                rewritten["cwd"] = str(workspace_root)
+            elif path_within(cwd, canonical_root):
+                rewritten["cwd"] = str(workspace_root / cwd.relative_to(canonical_root))
     command = rewritten.get("command", [])
     if isinstance(command, Sequence) and not isinstance(command, (str, bytes, bytearray)):
-        remapped_command: list[str] = []
-        for item in command:
-            text = coerce_str(item).strip()
-            replacement = text
-            if text:
-                try:
-                    candidate = Path(text).resolve()
-                except OSError:
-                    candidate = None
-                if candidate == canonical_root:
-                    replacement = str(workspace_root)
-                elif candidate is not None and path_within(candidate, canonical_root):
-                    replacement = str(workspace_root / candidate.relative_to(canonical_root))
-            remapped_command.append(replacement)
+        remapped_command = [_remap_path_text(coerce_str(item).strip()) for item in command]
         rewritten["command"] = remapped_command
         rewritten["command_display"] = _command_display(remapped_command)
     return rewritten

@@ -76,6 +76,94 @@ def _launch_execution_immediately(**kwargs: object) -> dict[str, object]:
     }
 
 
+def _launch_execution_session_ready(**kwargs: object) -> dict[str, object]:
+    result_path = Path(str(kwargs["result_path"]))
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    session_id = "11111111-2222-4333-8444-555555555555"
+    result_path.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": ["codex.cmd", "exec"],
+                "stdout": "Send the first task when you're ready.\n",
+                "stderr": f"session id: {session_id}\n",
+                "session_id": session_id,
+                "session_state": "ready_for_brief",
+                "parsed_output": {
+                    "status": "unknown",
+                    "summary": "",
+                    "changed_paths": [],
+                    "verification_notes": [],
+                    "needs_human": False,
+                    "human_question": "",
+                    "why_not_auto_answered": "",
+                    "required_reply_shape": "",
+                    "decision_tags": [],
+                    "options": [],
+                    "notes": [],
+                },
+                "pre_git_status": {"entries": []},
+                "post_git_status": {"entries": []},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "ok": True,
+        "pid": 1234,
+        "command": ["python", "codex_execution_launcher.py"],
+        "started_at": utc_now(),
+    }
+
+
+def _launch_execution_requests_task_again(**kwargs: object) -> dict[str, object]:
+    result_path = Path(str(kwargs["result_path"]))
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    session_id = "11111111-2222-4333-8444-555555555555"
+    result_path.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": ["codex.cmd", "exec", "resume", session_id],
+                "stdout": "Provide the task, and I'll handle it directly.\n",
+                "stderr": f"session id: {session_id}\n",
+                "session_id": session_id,
+                "session_state": "requested_task_again",
+                "parsed_output": {
+                    "status": "unknown",
+                    "summary": "",
+                    "changed_paths": [],
+                    "verification_notes": [],
+                    "needs_human": False,
+                    "human_question": "",
+                    "why_not_auto_answered": "",
+                    "required_reply_shape": "",
+                    "decision_tags": [],
+                    "options": [],
+                    "notes": [],
+                },
+                "pre_git_status": {"entries": []},
+                "post_git_status": {"entries": []},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "ok": True,
+        "pid": 1234,
+        "command": ["python", "codex_execution_launcher.py"],
+        "started_at": utc_now(),
+    }
+
+
 def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
     common_kwargs = {
         "request_path": Path(str(kwargs["request_path"])),
@@ -304,6 +392,522 @@ def _init_git_repo(project_root: Path) -> None:
 
 
 class SchedulerVerificationTests(unittest.TestCase):
+    def test_execution_session_ready_is_paused_and_reused_for_same_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, project_root = _make_scheduler(temp_dir)
+            design_artifact = paths.artifacts_dir / "cycle-test" / "00-design-contract.json"
+            design_artifact.parent.mkdir(parents=True, exist_ok=True)
+            design_artifact.write_text(
+                json.dumps(
+                    {
+                        "project_root": str(project_root),
+                        "selected_primary_doc": "docs/README.md",
+                        "selected_planning_doc": "plans/demo.md",
+                        "baseline_docs": ["designs/2026-03-25-task-centered-autonomous-ops-platform.md"],
+                        "execution_scope": "external_project",
+                        "selected_phase": {"title": "Phase 2"},
+                        "slice_key": "plans/demo.md::phase 2",
+                        "verification_expectation": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            execution_turn = RunnerTurn(
+                cycle_id="cycle-test",
+                sequence=2,
+                agent_spec={"id": "execution", "name": "Execution Agent"},
+                handoff={"inputs": {"latest_artifacts": {"design": [str(design_artifact)]}, "human_decisions": []}},
+                runtime_paths={},
+                mission=scheduler.mission.to_mapping(),
+                state=scheduler.state.to_mapping(),
+                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
+                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                communication_store=CommunicationStore(paths.harness_root),
+            )
+
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_session_ready):
+                execution_report = scheduler._execute_turn(execution_turn)
+
+            self.assertEqual(execution_report["execution_status"], "paused")
+            self.assertEqual(
+                execution_report["resume_brief"]["resume_session_id"],
+                "11111111-2222-4333-8444-555555555555",
+            )
+            scheduler._advance_after_report(
+                "execution",
+                {
+                    "cycle_id": "cycle-test",
+                    "handoff_path": str(execution_turn.handoff_path),
+                    "report_path": str(execution_turn.report_path),
+                    "state_after": {"cycle_id": "cycle-test", "sequence": 3},
+                    "report": execution_report,
+                },
+            )
+            pending_brief = scheduler._pending_execution_brief()
+            self.assertIsNotNone(pending_brief)
+            self.assertEqual(
+                pending_brief["resume_session_id"],
+                "11111111-2222-4333-8444-555555555555",
+            )
+            self.assertEqual(scheduler.state.active_agent, "execution")
+
+    def test_execution_session_that_requests_task_again_resumes_same_slice_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, project_root = _make_scheduler(temp_dir)
+            design_artifact = paths.artifacts_dir / "cycle-test" / "00-design-contract.json"
+            design_artifact.parent.mkdir(parents=True, exist_ok=True)
+            design_artifact.write_text(
+                json.dumps(
+                    {
+                        "project_root": str(project_root),
+                        "selected_primary_doc": "docs/README.md",
+                        "selected_planning_doc": "plans/demo.md",
+                        "baseline_docs": ["designs/2026-03-25-task-centered-autonomous-ops-platform.md"],
+                        "execution_scope": "external_project",
+                        "selected_phase": {"title": "Phase 2"},
+                        "slice_key": "plans/demo.md::phase 2",
+                        "verification_expectation": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            execution_turn = RunnerTurn(
+                cycle_id="cycle-test",
+                sequence=2,
+                agent_spec={"id": "execution", "name": "Execution Agent"},
+                handoff={
+                    "inputs": {
+                        "latest_artifacts": {"design": [str(design_artifact)]},
+                        "human_decisions": [],
+                        "pending_execution_brief": {
+                            "brief_id": "execution-retry-1",
+                            "decision": "retry_execution",
+                            "slice_key": "plans/demo.md::phase 2",
+                            "resume_session_id": "11111111-2222-4333-8444-555555555555",
+                        },
+                    }
+                },
+                runtime_paths={},
+                mission=scheduler.mission.to_mapping(),
+                state=scheduler.state.to_mapping(),
+                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
+                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                communication_store=CommunicationStore(paths.harness_root),
+            )
+
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_requests_task_again):
+                execution_report = scheduler._execute_turn(execution_turn)
+
+            self.assertEqual(execution_report["execution_status"], "paused")
+            self.assertEqual(execution_report["resume_brief"]["decision"], "continue_current_slice")
+            self.assertEqual(
+                execution_report["resume_brief"]["resume_session_id"],
+                "11111111-2222-4333-8444-555555555555",
+            )
+            scheduler._advance_after_report(
+                "execution",
+                {
+                    "cycle_id": "cycle-test",
+                    "handoff_path": str(execution_turn.handoff_path),
+                    "report_path": str(execution_turn.report_path),
+                    "state_after": {"cycle_id": "cycle-test", "sequence": 3},
+                    "report": execution_report,
+                },
+            )
+            pending_brief = scheduler._pending_execution_brief()
+            self.assertIsNotNone(pending_brief)
+            self.assertEqual(pending_brief["decision"], "continue_current_slice")
+            self.assertEqual(
+                pending_brief["resume_session_id"],
+                "11111111-2222-4333-8444-555555555555",
+            )
+            self.assertEqual(scheduler.state.active_agent, "execution")
+
+    def test_execution_session_that_repeats_task_again_restarts_fresh_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, project_root = _make_scheduler(temp_dir)
+            design_artifact = paths.artifacts_dir / "cycle-test" / "00-design-contract.json"
+            design_artifact.parent.mkdir(parents=True, exist_ok=True)
+            design_artifact.write_text(
+                json.dumps(
+                    {
+                        "project_root": str(project_root),
+                        "selected_primary_doc": "docs/README.md",
+                        "selected_planning_doc": "plans/demo.md",
+                        "baseline_docs": ["designs/2026-03-25-task-centered-autonomous-ops-platform.md"],
+                        "execution_scope": "external_project",
+                        "selected_phase": {"title": "Phase 2"},
+                        "slice_key": "plans/demo.md::phase 2",
+                        "verification_expectation": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            execution_turn = RunnerTurn(
+                cycle_id="cycle-test",
+                sequence=2,
+                agent_spec={"id": "execution", "name": "Execution Agent"},
+                handoff={
+                    "inputs": {
+                        "latest_artifacts": {"design": [str(design_artifact)]},
+                        "human_decisions": [],
+                        "pending_execution_brief": {
+                            "brief_id": "execution-retry-1",
+                            "decision": "continue_current_slice",
+                            "slice_key": "plans/demo.md::phase 2",
+                            "resume_session_id": "11111111-2222-4333-8444-555555555555",
+                            "restart_attempt": 1,
+                        },
+                    }
+                },
+                runtime_paths={},
+                mission=scheduler.mission.to_mapping(),
+                state=scheduler.state.to_mapping(),
+                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
+                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                communication_store=CommunicationStore(paths.harness_root),
+            )
+
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_requests_task_again):
+                execution_report = scheduler._execute_turn(execution_turn)
+
+            self.assertEqual(execution_report["execution_status"], "paused")
+            self.assertEqual(execution_report["resume_brief"]["decision"], "restart_current_slice_session")
+            self.assertEqual(
+                execution_report["resume_brief"]["previous_session_id"],
+                "11111111-2222-4333-8444-555555555555",
+            )
+            self.assertEqual(execution_report["resume_brief"]["resume_session_id"], "")
+
+    def test_execution_session_ready_restarts_fresh_after_repeat_no_task_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, project_root = _make_scheduler(temp_dir)
+            design_artifact = paths.artifacts_dir / "cycle-test" / "00-design-contract.json"
+            design_artifact.parent.mkdir(parents=True, exist_ok=True)
+            design_artifact.write_text(
+                json.dumps(
+                    {
+                        "project_root": str(project_root),
+                        "selected_primary_doc": "docs/README.md",
+                        "selected_planning_doc": "plans/demo.md",
+                        "baseline_docs": ["designs/2026-03-25-task-centered-autonomous-ops-platform.md"],
+                        "execution_scope": "external_project",
+                        "selected_phase": {"title": "Phase 2"},
+                        "slice_key": "plans/demo.md::phase 2",
+                        "verification_expectation": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            execution_turn = RunnerTurn(
+                cycle_id="cycle-test",
+                sequence=2,
+                agent_spec={"id": "execution", "name": "Execution Agent"},
+                handoff={
+                    "inputs": {
+                        "latest_artifacts": {"design": [str(design_artifact)]},
+                        "human_decisions": [],
+                        "pending_execution_brief": {
+                            "brief_id": "execution-resume-1",
+                            "decision": "continue_current_slice",
+                            "slice_key": "plans/demo.md::phase 2",
+                            "resume_session_id": "11111111-2222-4333-8444-555555555555",
+                            "resume_attempt": 1,
+                        },
+                    }
+                },
+                runtime_paths={},
+                mission=scheduler.mission.to_mapping(),
+                state=scheduler.state.to_mapping(),
+                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
+                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                communication_store=CommunicationStore(paths.harness_root),
+            )
+
+            with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_session_ready):
+                execution_report = scheduler._execute_turn(execution_turn)
+
+            self.assertEqual(execution_report["execution_status"], "paused")
+            self.assertEqual(execution_report["resume_brief"]["decision"], "restart_current_slice_session")
+            self.assertEqual(execution_report["resume_brief"]["resume_session_id"], "")
+            self.assertEqual(
+                execution_report["resume_brief"]["previous_resume_session_id"],
+                "11111111-2222-4333-8444-555555555555",
+            )
+
+    def test_audit_reopen_drops_terminal_execution_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, project_root = _make_scheduler(temp_dir)
+            execution_artifact_path = paths.artifacts_dir / "cycle-test" / "02-execution.json"
+            execution_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            execution_artifact_path.write_text(
+                json.dumps(
+                    {
+                        "design_contract": {
+                            "project_root": str(project_root),
+                            "selected_phase": {"title": "Phase 2"},
+                            "slice_key": "plans/demo.md::phase 2",
+                        },
+                        "execution_subagent": {
+                            "session_id": "11111111-2222-4333-8444-555555555555",
+                            "session_state": "terminal",
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            retry_brief = scheduler._build_execution_retry_brief(
+                {
+                    "design_contract": {
+                        "project_root": str(project_root),
+                        "selected_phase": {"title": "Phase 2"},
+                        "slice_key": "plans/demo.md::phase 2",
+                    },
+                    "execution_artifact_path": str(execution_artifact_path),
+                    "findings": ["verification failed"],
+                },
+                reopen_streak=1,
+            )
+
+            self.assertEqual(retry_brief["resume_session_id"], "")
+
+    def test_pending_execution_brief_prioritizes_execution_on_prepare_next_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, _, _, _ = _make_scheduler(temp_dir)
+            scheduler.state.active_agent = ""
+            scheduler._set_pending_execution_brief(
+                {
+                    "brief_id": "execution-resume-1",
+                    "decision": "continue_current_slice",
+                    "slice_key": "plans/demo.md::phase 2",
+                    "resume_session_id": "11111111-2222-4333-8444-555555555555",
+                }
+            )
+
+            scheduler._prepare_next_agent()
+
+            self.assertEqual(scheduler.state.active_agent, "execution")
+
+    def test_pending_design_brief_prioritizes_design_on_prepare_next_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, _, _, _ = _make_scheduler(temp_dir)
+            scheduler.state.active_agent = ""
+            scheduler._set_pending_agent_brief(
+                "design",
+                {
+                    "brief_id": "design-resume-1",
+                    "decision": "continue_current_slice",
+                    "slice_key": "plans/demo.md::phase 1",
+                },
+            )
+
+            scheduler._prepare_next_agent()
+
+            self.assertEqual(scheduler.state.active_agent, "design")
+
+    def test_design_paused_report_stores_pending_brief_and_resumes_design(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, _ = _make_scheduler(temp_dir)
+            scheduler._advance_after_report(
+                "design",
+                {
+                    "cycle_id": "cycle-test",
+                    "handoff_path": str(paths.handoffs_dir / "cycle-test-00-design.json"),
+                    "report_path": str(paths.reports_dir / "cycle-test-00-design.json"),
+                    "state_after": {"cycle_id": "cycle-test", "sequence": 1},
+                    "report": {
+                        "status": "running",
+                        "design_status": "paused",
+                        "resume_brief": {
+                            "brief_id": "design-resume-1",
+                            "decision": "continue_current_slice",
+                            "slice_key": "plans/demo.md::phase 1",
+                            "summary": "Resume design on the current slice.",
+                        },
+                        "artifacts": [],
+                    },
+                },
+            )
+
+            pending_brief = scheduler._pending_agent_brief("design")
+            self.assertIsNotNone(pending_brief)
+            self.assertEqual(pending_brief["decision"], "continue_current_slice")
+            self.assertEqual(scheduler.state.active_agent, "design")
+
+    def test_audit_paused_report_stores_pending_brief_and_resumes_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, _ = _make_scheduler(temp_dir)
+            scheduler._advance_after_report(
+                "audit",
+                {
+                    "cycle_id": "cycle-test",
+                    "handoff_path": str(paths.handoffs_dir / "cycle-test-00-audit.json"),
+                    "report_path": str(paths.reports_dir / "cycle-test-00-audit.json"),
+                    "state_after": {"cycle_id": "cycle-test", "sequence": 1},
+                    "report": {
+                        "status": "running",
+                        "audit_status": "paused",
+                        "resume_brief": {
+                            "brief_id": "audit-resume-1",
+                            "decision": "continue_current_slice",
+                            "slice_key": "plans/demo.md::phase 1",
+                            "summary": "Resume audit on the current slice.",
+                        },
+                        "artifacts": [],
+                    },
+                },
+            )
+
+            pending_brief = scheduler._pending_agent_brief("audit")
+            self.assertIsNotNone(pending_brief)
+            self.assertEqual(pending_brief["decision"], "continue_current_slice")
+            self.assertEqual(scheduler.state.active_agent, "audit")
+
+    def test_human_reply_for_execution_gate_keeps_resume_session_in_pending_execution_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, _ = _make_scheduler(temp_dir)
+            store = CommunicationStore(paths.harness_root)
+            session_id = "11111111-2222-4333-8444-555555555555"
+            brief = {
+                "title": "Execution needs a decision",
+                "question": "Should execution continue?",
+                "blocked_agent": scheduler.execution_agent_id or "execution",
+                "current_context": {
+                    "resume_session_id": session_id,
+                    "execution_artifact_path": str(paths.artifacts_dir / "cycle-test" / "02-execution.json"),
+                },
+            }
+            gate = store.open_gate(
+                title="Execution needs a decision",
+                prompt="Reply with continue or replan.",
+                context=json.dumps(brief, ensure_ascii=False),
+            )
+            scheduler.state.extra["pending_gate_id"] = gate["id"]
+            scheduler.state.extra["blocked_agent"] = scheduler.execution_agent_id or "execution"
+            scheduler.state.extra["resume_agent"] = scheduler.execution_agent_id or "execution"
+            scheduler.state.extra["communication_brief"] = brief
+
+            store.reply_to_gate(gate["id"], sender="human", body="continue\nKeep the mainline approach.")
+
+            resumed = scheduler._resume_if_human_replied()
+
+            self.assertTrue(resumed)
+            pending_brief = scheduler._pending_execution_brief()
+            self.assertIsNotNone(pending_brief)
+            self.assertEqual(pending_brief["resume_session_id"], session_id)
+            self.assertEqual(
+                pending_brief["execution_artifact_path"],
+                str(paths.artifacts_dir / "cycle-test" / "02-execution.json"),
+            )
+            self.assertIn("Keep the mainline approach.", pending_brief["human_reply"])
+
+    def test_execution_retry_brief_restarts_fresh_session_after_task_again_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler, paths, _, _ = _make_scheduler(temp_dir)
+            execution_artifact = paths.artifacts_dir / "cycle-test" / "02-execution.json"
+            execution_artifact.parent.mkdir(parents=True, exist_ok=True)
+            execution_artifact.write_text(
+                json.dumps(
+                    {
+                        "design_contract": {
+                            "slice_key": "plans/demo.md::phase 2",
+                            "selected_phase": {"title": "Phase 2"},
+                        },
+                        "execution_subagent": {
+                            "session_id": "11111111-2222-4333-8444-555555555555",
+                            "session_state": "requested_task_again",
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            brief = scheduler._build_execution_retry_brief(
+                {
+                    "execution_artifact_path": str(execution_artifact),
+                    "design_contract": {
+                        "slice_key": "plans/demo.md::phase 2",
+                        "selected_phase": {"title": "Phase 2"},
+                    },
+                    "findings": ["repeat finding"],
+                },
+                reopen_streak=2,
+            )
+
+            self.assertEqual(brief["decision"], "retry_execution")
+            self.assertEqual(brief["resume_session_id"], "11111111-2222-4333-8444-555555555555")
+            self.assertIn("Retry Phase 2", brief["summary"])
+
+    def test_workspace_remap_keeps_executable_names_intact(self) -> None:
+        from lib.scheduler_components.verification import _remap_verification_spec_to_workspace
+
+        canonical_root = Path.cwd().resolve()
+        workspace_root = Path("C:/tmp/aima-workspace")
+        pytest_spec = _remap_verification_spec_to_workspace(
+            {
+                "command": ["pytest", "tests/test_center_alembic_from_repo_root.py", "-q"],
+                "cwd": str(canonical_root),
+                "env": {"PYTHONPATH": "src/center"},
+                "source": "mapping",
+            },
+            workspace_root=workspace_root,
+            canonical_root=canonical_root,
+        )
+        go_spec = _remap_verification_spec_to_workspace(
+            {
+                "command": ["go", "test", "./...", "-v"],
+                "cwd": str(canonical_root / "src" / "engineer" / "access"),
+                "env": {},
+                "source": "mapping",
+            },
+            workspace_root=workspace_root,
+            canonical_root=canonical_root,
+        )
+        python_spec = _remap_verification_spec_to_workspace(
+            {
+                "command": ["python", str(canonical_root / "main.py"), "--format", "json"],
+                "cwd": str(canonical_root),
+                "env": {},
+                "source": "mapping",
+            },
+            workspace_root=workspace_root,
+            canonical_root=canonical_root,
+        )
+
+        self.assertEqual(pytest_spec["command"][0], "pytest")
+        self.assertEqual(pytest_spec["command"][1], "tests/test_center_alembic_from_repo_root.py")
+        self.assertEqual(pytest_spec["command"][2], "-q")
+        self.assertEqual(pytest_spec["cwd"], str(workspace_root))
+        self.assertEqual(go_spec["command"][0], "go")
+        self.assertEqual(go_spec["command"][1], "test")
+        self.assertEqual(go_spec["cwd"], str(workspace_root / "src" / "engineer" / "access"))
+        self.assertEqual(python_spec["command"][0], "python")
+        self.assertEqual(python_spec["command"][1], str(workspace_root / "main.py"))
+        self.assertEqual(python_spec["command"][2:], ["--format", "json"])
+
     def test_execution_records_subagent_and_verification_evidence_and_audit_accepts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scheduler, paths, doc_root, project_root = _make_scheduler(temp_dir)

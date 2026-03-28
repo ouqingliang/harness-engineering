@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import http.client
 import os
 from pathlib import Path
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import uuid
 
 from lib.runtime_state import ensure_runtime_root, load_mission, load_state
 
 
-def _fake_codex_env(temp_path: Path) -> dict[str, str]:
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _fake_codex_env(temp_path: Path, *, sleep_seconds: float = 0.0) -> dict[str, str]:
     bin_dir = temp_path / "fake-bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     script_path = temp_path / "fake_codex.py"
@@ -41,6 +51,10 @@ def _fake_codex_env(temp_path: Path) -> dict[str, str]:
                 "    'options': [],",
                 "    'notes': ['Execution used subagents for modification work.'],",
                 "}",
+                f"sleep_seconds = {sleep_seconds!r}",
+                "if sleep_seconds:",
+                "    import time",
+                "    time.sleep(float(sleep_seconds))",
                 "if output_path is not None:",
                 "    output_path.parent.mkdir(parents=True, exist_ok=True)",
                 "    output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')",
@@ -60,6 +74,67 @@ def _fake_codex_env(temp_path: Path) -> dict[str, str]:
 
 
 class HarnessEngineeringCliTests(unittest.TestCase):
+    def test_cli_run_serves_health_endpoint_while_execution_is_busy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        scratch_root = repo_root / ".tmp-tests"
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        temp_path = scratch_root / f"busy-health-{uuid.uuid4().hex[:8]}"
+        temp_path.mkdir(parents=True, exist_ok=True)
+        try:
+            doc_root = temp_path / "docs"
+            memory_root = temp_path / "memory"
+            env = _fake_codex_env(temp_path, sleep_seconds=5.0)
+            port = _free_port()
+            doc_root.mkdir()
+            (doc_root / "README.md").write_text("# CLI Demo\n\nOverall planning.\n", encoding="utf-8")
+
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "main.py",
+                    "run",
+                    "--doc-root",
+                    str(doc_root),
+                    "--memory-root",
+                    str(memory_root),
+                    "--port",
+                    str(port),
+                    "--no-browser",
+                    "--reset",
+                ],
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
+            try:
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    if process.poll() is not None:
+                        stdout, stderr = process.communicate(timeout=5)
+                        self.fail(f"run exited early:\nstdout={stdout}\nstderr={stderr}")
+                    try:
+                        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+                        connection.request("GET", "/health")
+                        response = connection.getresponse()
+                        body = response.read().decode("utf-8")
+                        connection.close()
+                        self.assertEqual(response.status, 200)
+                        self.assertIn('"ok": true', body.lower())
+                        break
+                    except OSError:
+                        time.sleep(0.2)
+                else:
+                    self.fail("health endpoint did not respond while run was active")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+        finally:
+            shutil.rmtree(temp_path, ignore_errors=True)
+
     def test_cli_run_reaches_completed_but_stays_alive(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as temp_dir:

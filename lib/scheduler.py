@@ -1163,6 +1163,15 @@ class HarnessScheduler:
     def _set_pending_execution_brief(self, payload: Mapping[str, Any] | None) -> None:
         self._set_pending_agent_brief(self.execution_agent_id or "execution", payload)
 
+    def _next_agent_with_pending_brief(self) -> str:
+        pending = self._pending_agent_briefs()
+        for spec in self.specs:
+            agent_id = coerce_str(spec.get("id")).strip()
+            brief = pending.get(agent_id)
+            if agent_id and isinstance(brief, Mapping) and brief:
+                return agent_id
+        return ""
+
     def _prefetch_completed(self) -> bool:
         return coerce_bool(self.mission.extra.get("prefetch_completed"), False)
 
@@ -1330,6 +1339,9 @@ class HarnessScheduler:
                 if running_for_agent:
                     entry["status"] = "running"
                     entry["summary"] = "Design is running in the background."
+                elif pending_brief:
+                    entry["status"] = "paused"
+                    entry["summary"] = current_brief or "Design paused on the current slice and is ready to resume."
                 elif planned_slice_queue:
                     queued_titles = [
                         coerce_str(item.get("selected_phase", {}).get("title") if isinstance(item.get("selected_phase"), Mapping) else "").strip()
@@ -1367,8 +1379,13 @@ class HarnessScheduler:
                     entry["summary"] = "Execution finished and is waiting for audit."
                     entry["details"] = [item for item in titles if item][:3]
                 elif pending_brief:
-                    entry["status"] = "retrying"
-                    entry["summary"] = "Supervisor routed the latest audit findings back to execution."
+                    decision = coerce_str(pending_brief.get("decision")).strip().lower()
+                    entry["status"] = "paused" if "resume" in decision or "continue" in decision else "retrying"
+                    entry["summary"] = current_brief or (
+                        "Execution paused on the current slice and is ready to resume."
+                        if entry["status"] == "paused"
+                        else "Supervisor routed the latest audit findings back to execution."
+                    )
                     entry["details"] = _normalize_text_list(pending_brief.get("findings", []))[:3]
                 elif active_agent == agent_id:
                     entry["status"] = "launching"
@@ -1380,6 +1397,9 @@ class HarnessScheduler:
                 if running_for_agent:
                     entry["status"] = "running"
                     entry["summary"] = "Audit is reviewing evidence in the background."
+                elif pending_brief:
+                    entry["status"] = "paused"
+                    entry["summary"] = current_brief or "Audit paused on the current slice and is ready to resume."
                 elif queued_for_agent:
                     titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in queued_for_agent]
                     entry["status"] = "queued"
@@ -1544,6 +1564,11 @@ class HarnessScheduler:
             self.state.active_agent = self.audit_agent_id
             self._save_runtime()
             return
+        pending_brief_agent = self._next_agent_with_pending_brief()
+        if pending_brief_agent:
+            self.state.active_agent = pending_brief_agent
+            self._save_runtime()
+            return
         if self.design_agent_id and self._current_running_agent(self.design_agent_id):
             self.state.active_agent = self.design_agent_id
             self._save_runtime()
@@ -1628,13 +1653,46 @@ class HarnessScheduler:
         human_decisions = list(self.mission.extra.get("human_decisions", []))
         human_decisions.append(answer_payload)
         self.mission.extra["human_decisions"] = human_decisions
-        pending_decision = _supervisor_decision_from_answer(answer_payload, self._communication_brief())
-        if pending_decision is not None:
+        communication_brief = self._communication_brief()
+        blocked_agent = coerce_str(self.state.extra.get("blocked_agent") or self.design_agent_id).strip()
+        pending_decision = _supervisor_decision_from_answer(answer_payload, communication_brief)
+        current_context = (
+            dict(communication_brief.get("current_context", {}))
+            if isinstance(communication_brief, Mapping) and isinstance(communication_brief.get("current_context", {}), Mapping)
+            else {}
+        )
+        decision_choice = coerce_str(pending_decision.get("choice")).strip().lower() if isinstance(pending_decision, Mapping) else ""
+        if blocked_agent == (self.execution_agent_id or "execution"):
+            if decision_choice == "replan":
+                self._set_pending_execution_brief(None)
+                if pending_decision is not None:
+                    self._set_pending_supervisor_decision(pending_decision)
+                    self._clear_audit_reopen_tracking()
+                self.state.extra["resume_agent"] = self.design_agent_id or self._default_work_entry_agent()
+            else:
+                self._set_pending_supervisor_decision(None)
+                execution_brief = {
+                    "brief_id": _new_id("execution-resume"),
+                    "decision": "resume_execution_after_human_reply",
+                    "human_reply": coerce_str(answer_payload.get("answer") or answer_payload.get("body")).strip(),
+                    "resume_session_id": coerce_str(current_context.get("resume_session_id")).strip(),
+                    "execution_artifact_path": coerce_str(current_context.get("execution_artifact_path")).strip(),
+                    "created_at": utc_now(),
+                    "summary": "Resume the paused execution session after incorporating the human reply.",
+                }
+                if current_context:
+                    execution_brief["current_context"] = current_context
+                if isinstance(pending_decision, Mapping) and pending_decision:
+                    execution_brief["human_decision"] = dict(pending_decision)
+                self._set_pending_execution_brief(execution_brief)
+                self.state.extra["resume_agent"] = self.execution_agent_id or blocked_agent
+        elif pending_decision is not None:
             self._set_pending_supervisor_decision(pending_decision)
             self._clear_audit_reopen_tracking()
+        else:
+            self._set_pending_supervisor_decision(None)
         self.mission.status = "active"
         self._set_latest_human_reply(answer_payload)
-        self.state.extra["resume_agent"] = coerce_str(self.state.extra.get("blocked_agent") or self.design_agent_id)
         self.state.extra["applied_answer_id"] = answer_payload.get("id", "")
         self.state.extra["pending_gate_id"] = ""
         self.state.active_agent = self.communication_agent_id or self.state.extra["resume_agent"]
@@ -1996,7 +2054,17 @@ class HarnessScheduler:
         *,
         reopen_streak: int,
     ) -> dict[str, Any]:
+        execution_artifact_path = coerce_str(report.get("execution_artifact_path")).strip()
+        execution_artifact = {}
+        if execution_artifact_path and Path(execution_artifact_path).exists():
+            loaded_execution_artifact = self._load_json(execution_artifact_path)
+            if isinstance(loaded_execution_artifact, Mapping):
+                execution_artifact = dict(loaded_execution_artifact)
         design_contract = report.get("design_contract", {})
+        if not isinstance(design_contract, Mapping) or not design_contract:
+            loaded_contract = execution_artifact.get("design_contract", {})
+            if isinstance(loaded_contract, Mapping):
+                design_contract = dict(loaded_contract)
         if not isinstance(design_contract, Mapping):
             design_contract = {}
         selected_phase = design_contract.get("selected_phase", {})
@@ -2004,16 +2072,30 @@ class HarnessScheduler:
             selected_phase = {}
         findings = _normalize_text_list(report.get("findings", []))
         phase_title = coerce_str(selected_phase.get("title")).strip() or "the current slice"
+        execution_subagent = execution_artifact.get("execution_subagent", {})
+        if not isinstance(execution_subagent, Mapping):
+            execution_subagent = {}
+        resume_session_id = ""
+        if coerce_str(execution_subagent.get("session_state")).strip().lower() in {"ready_for_brief", "requested_task_again"}:
+            resume_session_id = coerce_str(execution_subagent.get("session_id")).strip()
+        decision = "retry_execution" if resume_session_id else "restart_current_slice_session"
+        summary = (
+            f"Retry {phase_title} after audit findings are addressed inside the assigned worktree."
+            if resume_session_id
+            else f"Start a fresh execution session for {phase_title}; the previous session asked for the task again without making progress."
+        )
         return {
             "brief_id": _new_id("execution-retry"),
-            "decision": "retry_execution",
+            "decision": decision,
             "slice_key": coerce_str(design_contract.get("slice_key")).strip(),
             "phase_title": phase_title,
             "findings": findings,
             "reopen_streak": reopen_streak,
             "design_contract": dict(design_contract),
+            "resume_session_id": resume_session_id,
+            "execution_artifact_path": execution_artifact_path,
             "created_at": utc_now(),
-            "summary": f"Retry {phase_title} after audit findings are addressed inside the assigned worktree.",
+            "summary": summary,
         }
 
     def _auto_replan_stalled_slice(self, report: Mapping[str, Any], *, repeat_count: int) -> None:
@@ -2150,6 +2232,13 @@ class HarnessScheduler:
 
         if agent_id == self.design_agent_id:
             design_status = coerce_str(report.get("design_status")).strip()
+            if design_status == "paused":
+                resume_brief = report.get("resume_brief", {})
+                if isinstance(resume_brief, Mapping) and resume_brief:
+                    self._set_pending_agent_brief(self.design_agent_id or "design", resume_brief)
+                self.state.active_agent = self.design_agent_id or ""
+                self._save_runtime()
+                return
             artifacts = report.get("artifacts", [])
             contract_artifact_path = str(artifacts[-1]) if isinstance(artifacts, list) and artifacts else ""
             if contract_artifact_path:
@@ -2221,6 +2310,13 @@ class HarnessScheduler:
                 self._request_scheduler_yield()
                 self._save_runtime()
                 return
+            if execution_status == "paused":
+                resume_brief = report.get("resume_brief", {})
+                if isinstance(resume_brief, Mapping) and resume_brief:
+                    self._set_pending_execution_brief(resume_brief)
+                self.state.active_agent = self.execution_agent_id or ""
+                self._save_runtime()
+                return
             self._set_pending_execution_brief(None)
             self.state.active_agent = self.audit_agent_id or ""
             if not self.state.active_agent:
@@ -2230,6 +2326,13 @@ class HarnessScheduler:
             return
 
         if agent_id == self.audit_agent_id:
+            if coerce_str(report.get("audit_status")).strip() == "paused":
+                resume_brief = report.get("resume_brief", {})
+                if isinstance(resume_brief, Mapping) and resume_brief:
+                    self._set_pending_agent_brief(self.audit_agent_id or "audit", resume_brief)
+                self.state.active_agent = self.audit_agent_id or ""
+                self._save_runtime()
+                return
             if coerce_str(report.get("audit_status")).strip() in {"launched", "running"}:
                 next_agent = ""
                 if (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -22,8 +23,16 @@ from lib.runtime_state import (
     load_state,
     save_mission,
     save_state,
+    utc_now,
 )
-from lib.scheduler_components.background_runtime import HARNESS_ROOT, launch_background_agent, load_launcher_status
+from lib.scheduler_components.background_runtime import (
+    HARNESS_ROOT,
+    _pid_matches_launcher,
+    launch_background_agent,
+    load_launcher_status,
+    save_launcher_state,
+)
+from lib.scheduler_components.execution import DEFAULT_EXECUTION_OUTPUT, _run_execution_subagent_from_saved_request
 
 
 class RuntimeFileTests(unittest.TestCase):
@@ -136,6 +145,488 @@ class RuntimeFileTests(unittest.TestCase):
             self.assertEqual(status["active_run_id"], "")
             self.assertEqual(status["last_exit_code"], -1)
             self.assertIn("stale_reason", status)
+
+    def test_running_launcher_without_pid_and_without_run_or_result_is_marked_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launcher_dir = root / "launchers" / "execution"
+            launcher_dir.mkdir(parents=True, exist_ok=True)
+            launcher_state_path = launcher_dir / "state.json"
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text("{}\n", encoding="utf-8")
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "execution",
+                        "active_run_id": "cycle-001-00",
+                        "last_request_path": str(request_path),
+                        "last_result_path": str(result_path),
+                        "started_at": "2026-03-27T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            status = load_launcher_status(launcher_state_path)
+
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["active_run_id"], "")
+            self.assertEqual(status["last_exit_code"], -1)
+            self.assertIn("stale_reason", status)
+            self.assertIn("missing", status["stale_reason"])
+
+    def test_running_launcher_with_reused_pid_is_marked_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher_state_path = Path(temp_dir) / "state.json"
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "execution",
+                        "active_run_id": "cycle-001-00",
+                        "pid": 26688,
+                        "pid_executable": "python.exe",
+                        "started_at": "2026-03-27T00:00:00Z",
+                        "pid_mismatch_detected_at": "2026-03-27T00:00:00Z",
+                        "last_request_path": str(Path(temp_dir) / "request.json"),
+                        "last_result_path": str(Path(temp_dir) / "result.json"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("lib.scheduler_components.background_runtime._pid_is_alive", return_value=True), patch(
+                "lib.scheduler_components.background_runtime._pid_matches_launcher",
+                return_value=False,
+            ):
+                status = load_launcher_status(launcher_state_path)
+
+            self.assertEqual(status["status"], "failed")
+            self.assertEqual(status["last_exit_code"], -1)
+            self.assertIn("different process", status["stale_reason"])
+
+    def test_recent_pid_mismatch_stays_running_during_grace_period(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher_state_path = Path(temp_dir) / "state.json"
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "execution",
+                        "active_run_id": "cycle-001-00",
+                        "pid": 26688,
+                        "pid_executable": "python.exe",
+                        "started_at": "2026-03-27T00:00:00Z",
+                        "heartbeat_at": utc_now(),
+                        "last_request_path": str(Path(temp_dir) / "request.json"),
+                        "last_result_path": str(Path(temp_dir) / "result.json"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("lib.scheduler_components.background_runtime._pid_is_alive", return_value=True), patch(
+                "lib.scheduler_components.background_runtime._pid_matches_launcher",
+                return_value=False,
+            ):
+                status = load_launcher_status(launcher_state_path)
+
+            self.assertEqual(status["status"], "running")
+
+    def test_first_pid_mismatch_only_records_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher_state_path = Path(temp_dir) / "state.json"
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "execution",
+                        "active_run_id": "cycle-001-00",
+                        "pid": 26688,
+                        "pid_executable": "python.exe",
+                        "started_at": "2026-03-27T00:00:00Z",
+                        "last_request_path": str(Path(temp_dir) / "request.json"),
+                        "last_result_path": str(Path(temp_dir) / "result.json"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("lib.scheduler_components.background_runtime._pid_is_alive", return_value=True), patch(
+                "lib.scheduler_components.background_runtime._pid_matches_launcher",
+                return_value=False,
+            ):
+                status = load_launcher_status(launcher_state_path)
+
+            self.assertEqual(status["status"], "running")
+            self.assertTrue(status.get("pid_mismatch_detected_at"))
+
+    def test_running_update_preserves_recent_heartbeat_for_same_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            launcher_state_path = root / "state.json"
+            request_path = root / "request.json"
+            result_path = root / "result.json"
+            heartbeat_at = utc_now()
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "execution",
+                        "active_run_id": "cycle-001-00",
+                        "last_request_path": str(request_path),
+                        "last_result_path": str(result_path),
+                        "heartbeat_at": heartbeat_at,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            updated = save_launcher_state(
+                launcher_state_path=launcher_state_path,
+                request_path=request_path,
+                result_path=result_path,
+                payload={
+                    "status": "running",
+                    "agent_id": "execution",
+                    "last_request_path": str(request_path),
+                    "last_result_path": str(result_path),
+                },
+            )
+
+            self.assertEqual(updated.get("heartbeat_at"), heartbeat_at)
+
+    def test_pid_identity_match_beats_executable_name_difference(self) -> None:
+        payload = {
+            "pid": 26688,
+            "pid_identity": "created-token-123",
+            "pid_executable": "python.exe",
+        }
+
+        with patch(
+            "lib.scheduler_components.background_runtime._process_identity_token",
+            return_value="created-token-123",
+        ), patch(
+            "lib.scheduler_components.background_runtime._process_executable_path",
+            return_value="python3.10.exe",
+        ):
+            self.assertTrue(_pid_matches_launcher(26688, payload))
+
+    def test_recent_heartbeat_prevents_pid_dead_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher_state_path = Path(temp_dir) / "state.json"
+            launcher_state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "agent_id": "execution",
+                        "active_run_id": "cycle-001-00",
+                        "pid": 26688,
+                        "pid_executable": "python.exe",
+                        "started_at": "2026-03-27T00:00:00Z",
+                        "heartbeat_at": utc_now(),
+                        "last_request_path": str(Path(temp_dir) / "request.json"),
+                        "last_result_path": str(Path(temp_dir) / "result.json"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch("lib.scheduler_components.background_runtime._pid_is_alive", return_value=False):
+                status = load_launcher_status(launcher_state_path)
+
+            self.assertEqual(status["status"], "running")
+
+    def test_saved_execution_request_can_resume_prior_codex_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace_root = root / "workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = root / "launchers" / "execution" / "state.json"
+            launcher_run_path = root / "launchers" / "execution" / "runs" / "cycle-001-00.json"
+            schema_path = request_path.with_name("00-execution-request-schema.json")
+            output_path = root / "artifacts" / "cycle-001" / "00-execution-result.message.json"
+            session_id = "11111111-2222-4333-8444-555555555555"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "workspace_root": str(workspace_root),
+                        "prompt": "Continue after the last human reply.",
+                        "codex_executable": "codex",
+                        "schema_path": str(schema_path),
+                        "output_path": str(output_path),
+                        "recorded_at": "2026-03-27T00:00:00Z",
+                        "resume_session_id": session_id,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "status": "implemented",
+                        "summary": "Resumed the prior session.",
+                        "changed_paths": [],
+                        "verification_notes": [],
+                        "needs_human": False,
+                        "human_question": "",
+                        "why_not_auto_answered": "",
+                        "required_reply_shape": "",
+                        "decision_tags": [],
+                        "options": [],
+                        "notes": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec", "resume", session_id],
+                returncode=0,
+                stdout="",
+                stderr=f"session id: {session_id}\n",
+            )
+            with patch(
+                "lib.scheduler_components.execution.subprocess.run",
+                return_value=completed,
+            ) as run_mock, patch(
+                "lib.scheduler_components.execution._git_status_snapshot",
+                return_value={"entries": [], "ok": True},
+            ):
+                payload = _run_execution_subagent_from_saved_request(
+                    request_path=request_path,
+                    result_path=result_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                )
+
+            command = next(
+                call.args[0]
+                for call in run_mock.call_args_list
+                if call.args and isinstance(call.args[0], list) and call.args[0][:3] == ["codex", "exec", "resume"]
+            )
+            self.assertEqual(command[:4], ["codex", "exec", "resume", session_id])
+            self.assertEqual(command[4], "Continue after the last human reply.")
+            self.assertEqual(payload["session_id"], session_id)
+            self.assertTrue(payload["ok"])
+
+    def test_saved_execution_request_detects_session_requested_task_again_without_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace_root = root / "workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = root / "launchers" / "execution" / "state.json"
+            launcher_run_path = root / "launchers" / "execution" / "runs" / "cycle-001-00.json"
+            schema_path = request_path.with_name("00-execution-request-schema.json")
+            output_path = root / "artifacts" / "cycle-001" / "00-execution-result.message.json"
+            session_id = "11111111-2222-4333-8444-555555555555"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "workspace_root": str(workspace_root),
+                        "prompt": "Implement the approved slice.",
+                        "codex_executable": "codex",
+                        "schema_path": str(schema_path),
+                        "output_path": str(output_path),
+                        "recorded_at": "2026-03-27T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "status": "unknown",
+                        "summary": "",
+                        "changed_paths": [],
+                        "verification_notes": [],
+                        "needs_human": False,
+                        "human_question": "",
+                        "why_not_auto_answered": "",
+                        "required_reply_shape": "",
+                        "decision_tags": [],
+                        "options": [],
+                        "notes": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec"],
+                returncode=0,
+                stdout="Send the specific task when you're ready.\n",
+                stderr=f"session id: {session_id}\n",
+            )
+
+            with patch(
+                "lib.scheduler_components.execution.subprocess.run",
+                return_value=completed,
+            ), patch(
+                "lib.scheduler_components.execution._git_status_snapshot",
+                return_value={"entries": [], "ok": True},
+            ):
+                payload = _run_execution_subagent_from_saved_request(
+                    request_path=request_path,
+                    result_path=result_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                )
+
+            self.assertEqual(payload["session_id"], session_id)
+            self.assertEqual(payload["session_state"], "requested_task_again")
+
+    def test_saved_execution_request_detects_provide_task_readiness_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace_root = root / "workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = root / "launchers" / "execution" / "state.json"
+            launcher_run_path = root / "launchers" / "execution" / "runs" / "cycle-001-00.json"
+            schema_path = request_path.with_name("00-execution-request-schema.json")
+            output_path = root / "artifacts" / "cycle-001" / "00-execution-result.message.json"
+            session_id = "11111111-2222-4333-8444-555555555555"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "workspace_root": str(workspace_root),
+                        "prompt": "Implement the approved slice.",
+                        "codex_executable": "codex",
+                        "schema_path": str(schema_path),
+                        "output_path": str(output_path),
+                        "recorded_at": "2026-03-27T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_path.write_text(
+                json.dumps(DEFAULT_EXECUTION_OUTPUT, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec"],
+                returncode=0,
+                stdout="Provide the task, and I'll handle it directly.\n",
+                stderr=f"session id: {session_id}\n",
+            )
+
+            with patch(
+                "lib.scheduler_components.execution.subprocess.run",
+                return_value=completed,
+            ), patch(
+                "lib.scheduler_components.execution._git_status_snapshot",
+                return_value={"entries": [], "ok": True},
+            ):
+                payload = _run_execution_subagent_from_saved_request(
+                    request_path=request_path,
+                    result_path=result_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                )
+
+            self.assertEqual(payload["session_id"], session_id)
+            self.assertEqual(payload["session_state"], "requested_task_again")
+
+    def test_saved_execution_request_detects_using_superpowers_bootstrap_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace_root = root / "workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = root / "launchers" / "execution" / "state.json"
+            launcher_run_path = root / "launchers" / "execution" / "runs" / "cycle-001-00.json"
+            schema_path = request_path.with_name("00-execution-request-schema.json")
+            output_path = root / "artifacts" / "cycle-001" / "00-execution-result.message.json"
+            session_id = "11111111-2222-4333-8444-555555555555"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "workspace_root": str(workspace_root),
+                        "prompt": "Implement the approved slice.",
+                        "codex_executable": "codex",
+                        "schema_path": str(schema_path),
+                        "output_path": str(output_path),
+                        "recorded_at": "2026-03-27T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_path.write_text(
+                json.dumps(DEFAULT_EXECUTION_OUTPUT, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec"],
+                returncode=0,
+                stdout="Using `using-superpowers` to align with the required skill workflow for this session.\n",
+                stderr=f"session id: {session_id}\n",
+            )
+
+            with patch(
+                "lib.scheduler_components.execution.subprocess.run",
+                return_value=completed,
+            ), patch(
+                "lib.scheduler_components.execution._git_status_snapshot",
+                return_value={"entries": [], "ok": True},
+            ):
+                payload = _run_execution_subagent_from_saved_request(
+                    request_path=request_path,
+                    result_path=result_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                )
+
+            self.assertEqual(payload["session_id"], session_id)
+            self.assertEqual(payload["session_state"], "requested_task_again")
 
     def test_parent_launch_does_not_overwrite_child_completed_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

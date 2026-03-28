@@ -593,8 +593,151 @@ def _execute_execution_turn(
     execution_output = execution_result.get("parsed_output", {})
     if not isinstance(execution_output, Mapping):
         execution_output = dict(DEFAULT_EXECUTION_OUTPUT)
+    session_state = coerce_str(execution_result.get("session_state")).strip().lower()
+    resume_session_id = coerce_str(execution_result.get("session_id")).strip()
+    if session_state == "requested_task_again":
+        artifact_path = scheduler._artifact_path(turn, "execution")
+        current_attempt = coerce_int(supervisor_brief.get("restart_attempt"), 0) if isinstance(supervisor_brief, Mapping) else 0
+        resume_same_session = current_attempt == 0 and bool(resume_session_id)
+        resume_brief = {
+            "brief_id": new_id("execution-restart"),
+            "decision": "continue_current_slice" if resume_same_session else "restart_current_slice_session",
+            "slice_key": slice_key,
+            "phase_title": phase_title,
+            "resume_session_id": resume_session_id if resume_same_session else "",
+            "execution_artifact_path": str(artifact_path),
+            "restart_attempt": current_attempt + 1,
+            "created_at": utc_now(),
+            "summary": (
+                f"Resume the same execution session for {phase_title}; it asked for the task again before making progress."
+                if resume_same_session
+                else f"Start a fresh execution session for {phase_title}; the previous session asked for the task again without making progress."
+            ),
+        }
+        if resume_session_id and not resume_same_session:
+            resume_brief["previous_session_id"] = resume_session_id
+        _write_json(
+            artifact_path,
+            {
+                "goal": turn.mission.get("goal", ""),
+                "project_root": str(canonical_project_root),
+                "workspace_root": str(execution_workspace_root),
+                "selected_primary_doc": execution_contract.get("selected_primary_doc") or inputs.get("selected_primary_doc", ""),
+                "design_contract": execution_contract,
+                "supervisor_brief": supervisor_brief,
+                "execution_subagent": execution_result,
+                "execution_output": execution_output,
+                "verification_expectation": execution_contract.get("verification_expectation", []),
+                "verification_specs": [],
+                "verification_commands": [],
+                "work_items": execution_contract.get("work_items", []),
+                "target_paths": execution_contract.get("target_paths", []),
+                "verification_runs": [],
+                "verification_status": "restart_pending",
+                "verification_findings": [],
+                "resume_brief": resume_brief,
+                "recorded_at": utc_now(),
+            },
+        )
+        return {
+            "status": "running",
+            "summary": (
+                f"Execution session asked for the task again for {phase_title}; resuming the same session once with the existing task."
+                if resume_same_session
+                else f"Execution session asked for the task again for {phase_title}; restarting the same slice in a fresh session."
+            ),
+            "execution_status": "paused",
+            "slice_key": slice_key,
+            "phase_title": phase_title,
+            "resume_brief": resume_brief,
+            "execution_artifact_path": str(artifact_path),
+            "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
+        }
+    if session_state == "ready_for_brief":
+        artifact_path = scheduler._artifact_path(turn, "execution")
+        current_attempt = coerce_int(supervisor_brief.get("resume_attempt"), 0) if isinstance(supervisor_brief, Mapping) else 0
+        next_attempt = current_attempt + 1
+        resume_same_session = current_attempt == 0 and bool(resume_session_id)
+        resume_brief = {
+            "brief_id": new_id("execution-resume"),
+            "decision": "continue_current_slice" if resume_same_session else "restart_current_slice_session",
+            "slice_key": slice_key,
+            "phase_title": phase_title,
+            "resume_session_id": resume_session_id if resume_same_session else "",
+            "execution_artifact_path": str(artifact_path),
+            "resume_attempt": next_attempt,
+            "created_at": utc_now(),
+            "summary": (
+                f"Continue the same execution session for {phase_title}. This is still the current task, not a new task."
+                if resume_same_session
+                else f"Start a fresh execution session for {phase_title} because the last paused session never accepted the task brief."
+            ),
+        }
+        if resume_session_id and not resume_same_session:
+            resume_brief["previous_resume_session_id"] = resume_session_id
+        _write_json(
+            artifact_path,
+            {
+                "goal": turn.mission.get("goal", ""),
+                "project_root": str(canonical_project_root),
+                "workspace_root": str(execution_workspace_root),
+                "selected_primary_doc": execution_contract.get("selected_primary_doc") or inputs.get("selected_primary_doc", ""),
+                "design_contract": execution_contract,
+                "supervisor_brief": supervisor_brief,
+                "execution_subagent": execution_result,
+                "execution_output": execution_output,
+                "verification_expectation": execution_contract.get("verification_expectation", []),
+                "verification_specs": [],
+                "verification_commands": [],
+                "work_items": execution_contract.get("work_items", []),
+                "target_paths": execution_contract.get("target_paths", []),
+                "verification_runs": [],
+                "verification_status": "resume_pending",
+                "verification_findings": [],
+                "resume_brief": resume_brief,
+                "recorded_at": utc_now(),
+            },
+        )
+        return {
+            "status": "running",
+            "summary": (
+                f"Execution session is ready to continue for {phase_title}."
+                if resume_same_session
+                else f"Execution needs a fresh session restart for {phase_title} after a no-task reply."
+            ),
+            "execution_status": "paused",
+            "slice_key": slice_key,
+            "phase_title": phase_title,
+            "resume_brief": resume_brief,
+            "execution_artifact_path": str(artifact_path),
+            "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
+        }
     needs_human = bool(execution_output.get("needs_human"))
     if needs_human:
+        artifact_path = scheduler._artifact_path(turn, "execution")
+        _write_json(
+            artifact_path,
+            {
+                "goal": turn.mission.get("goal", ""),
+                "project_root": str(canonical_project_root),
+                "workspace_root": str(execution_workspace_root),
+                "selected_primary_doc": execution_contract.get("selected_primary_doc") or inputs.get("selected_primary_doc", ""),
+                "design_contract": execution_contract,
+                "supervisor_brief": supervisor_brief,
+                "execution_subagent": execution_result,
+                "execution_output": execution_output,
+                "verification_expectation": execution_contract.get("verification_expectation", []),
+                "verification_specs": [],
+                "verification_commands": [],
+                "work_items": execution_contract.get("work_items", []),
+                "target_paths": execution_contract.get("target_paths", []),
+                "verification_runs": [],
+                "verification_status": "pending_human",
+                "verification_findings": [],
+                "session_state": session_state,
+                "recorded_at": utc_now(),
+            },
+        )
         return {
             "status": "blocked",
             "summary": coerce_str(execution_output.get("summary")).strip() or "Execution needs a decision before it can continue.",
@@ -614,10 +757,12 @@ def _execute_execution_turn(
                         "supervisor_recommendation": coerce_str(execution_output.get("why_not_auto_answered")).strip(),
                         "selected_primary_doc": design_contract.get("selected_primary_doc", ""),
                         "selected_phase": design_contract.get("selected_phase", {}),
+                        "resume_session_id": resume_session_id,
+                        "execution_artifact_path": str(artifact_path),
                     },
                 }
             ],
-            "artifacts": [str(request_artifact_path), str(result_artifact_path)],
+            "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
         }
     specs = verification_specs(
         execution_contract,
@@ -653,6 +798,7 @@ def _execute_execution_turn(
             "verification_runs": verification_runs,
             "verification_status": "passed" if verification_ok else "failed",
             "verification_findings": verification_findings,
+            "session_state": session_state,
             "recorded_at": utc_now(),
         },
     )

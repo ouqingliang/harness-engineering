@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -238,6 +240,7 @@ def command_run(argv: list[str]) -> int:
     scheduler = HarnessScheduler(specs=specs, paths=paths, mission=mission, state=state)
 
     server = None
+    server_thread = None
     try:
         with RuntimeLock.for_memory_root(paths.memory_root):
             server = create_server(
@@ -254,6 +257,8 @@ def command_run(argv: list[str]) -> int:
                     webbrowser.open(human_url)
                 except Exception:
                     pass
+            server_thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
+            server_thread.start()
 
             try:
                 last_status_payload = ""
@@ -275,13 +280,15 @@ def command_run(argv: list[str]) -> int:
                     if payload != last_status_payload:
                         print(payload)
                         last_status_payload = payload
-                    server.timeout = config.sleep_seconds
-                    server.handle_request()
+                    time.sleep(config.sleep_seconds)
             except KeyboardInterrupt:
                 print(json.dumps({"status": "stopped", "reason": "keyboard_interrupt"}, ensure_ascii=False))
                 return 0
             finally:
+                server.shutdown()
                 server.server_close()
+                if server_thread is not None:
+                    server_thread.join(timeout=5)
     except RuntimeLockError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
