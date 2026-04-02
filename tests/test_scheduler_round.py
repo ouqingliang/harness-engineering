@@ -86,7 +86,7 @@ def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
     agent_id = str(kwargs["agent_id"])
     if agent_id == "design":
         run_saved_design_request(**common_kwargs)
-    elif agent_id == "audit":
+    elif agent_id in {"verification", "audit"}:
         run_saved_audit_request(**common_kwargs)
     else:
         raise AssertionError(f"unexpected background agent: {agent_id}")
@@ -484,6 +484,9 @@ class SchedulerRoundTests(unittest.TestCase):
             self.assertEqual(recent_events[-2]["outcome"], "route_to_decision")
             self.assertEqual(recent_events[-1]["outcome"], "route_to_decision")
             self.assertEqual(recent_events[-1]["subject"], "design")
+            self.assertEqual(scheduler.decision_agent_id, "decision")
+            self.assertEqual(scheduler.state.extra["communication_brief"]["blocked_agent"], "design")
+            self.assertEqual(scheduler.state.extra["communication_brief"]["decision_id"], "q-gate-001")
 
     def test_design_prefetches_the_next_slice_into_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

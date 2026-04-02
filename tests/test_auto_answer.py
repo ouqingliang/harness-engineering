@@ -45,7 +45,7 @@ class AutoAnswerTests(unittest.TestCase):
     def test_explicit_marker_flag_opens_gate_without_tag_match(self) -> None:
         question = Question(
             question_id="gate-002",
-            agent="audit-agent",
+            agent="verification-agent",
             question="Need human confirmation before continuing.",
             blocking=False,
             importance="low",

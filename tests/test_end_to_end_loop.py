@@ -76,7 +76,7 @@ def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
     agent_id = str(kwargs["agent_id"])
     if agent_id == "design":
         run_saved_design_request(**common_kwargs)
-    elif agent_id == "audit":
+    elif agent_id in {"verification", "audit"}:
         run_saved_audit_request(**common_kwargs)
     else:
         raise AssertionError(f"unexpected background agent: {agent_id}")
@@ -154,6 +154,10 @@ class EndToEndLoopTests(unittest.TestCase):
 
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.state.current_round, 1)
+            step_ids = [step["agent"]["id"] for step in result.steps]
+            self.assertEqual(step_ids[:3], ["execution", "verification", "cleanup"])
+            self.assertNotIn("communication", step_ids)
+            self.assertNotIn("audit", step_ids)
             self.assertTrue(paths.events_dir.exists())
             self.assertTrue(paths.sessions_dir.exists())
             self.assertTrue(paths.inbox_dir.exists())
@@ -166,6 +170,26 @@ class EndToEndLoopTests(unittest.TestCase):
             mission_payload = json.loads(paths.mission_file.read_text(encoding="utf-8"))
             self.assertEqual(mission_payload["doc_count"], 2)
             self.assertEqual(mission_payload["status"], "completed")
+
+            report_and_artifact_paths = []
+            for step in result.steps:
+                report_path = step.get("report_path")
+                if report_path:
+                    report_and_artifact_paths.append(Path(str(report_path)))
+                for artifact_path in step.get("report", {}).get("artifacts", []):
+                    path = Path(str(artifact_path))
+                    if "launcher-" in path.name:
+                        continue
+                    if not path.exists():
+                        continue
+                    report_and_artifact_paths.append(path)
+
+            for json_path in report_and_artifact_paths:
+                payload = json_path.read_text(encoding="utf-8")
+                self.assertNotIn('"id": "communication"', payload, msg=str(json_path))
+                self.assertNotIn('"id": "audit"', payload, msg=str(json_path))
+                self.assertNotIn('"agent_id": "communication"', payload, msg=str(json_path))
+                self.assertNotIn('"agent_id": "audit"', payload, msg=str(json_path))
 
 
 if __name__ == "__main__":

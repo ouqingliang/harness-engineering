@@ -63,6 +63,7 @@ class QuestionRoutingConfigTests(unittest.TestCase):
             self.assertEqual(scheduler.state.active_agent, "")
             self.assertEqual(scheduler.state.extra["blocked_agent"], "design")
             self.assertEqual(scheduler.state.extra["resume_agent"], "design")
+            self.assertEqual(scheduler.decision_agent_id, "decision")
             self.assertEqual(
                 scheduler.state.extra["communication_brief"]["severity"],
                 "release_gate",

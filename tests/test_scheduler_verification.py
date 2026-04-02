@@ -174,7 +174,7 @@ def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
     agent_id = str(kwargs["agent_id"])
     if agent_id == "design":
         run_saved_design_request(**common_kwargs)
-    elif agent_id == "audit":
+    elif agent_id in {"verification", "audit"}:
         run_saved_audit_request(**common_kwargs)
     else:
         raise AssertionError(f"unexpected background agent: {agent_id}")
@@ -198,7 +198,7 @@ def _make_scheduler(temp_dir: str) -> tuple[HarnessScheduler, Path, Path, Path]:
     paths = ensure_runtime_root(memory_root)
     mission = Mission(
         doc_root=str(doc_root),
-        goal="verify execution and audit evidence",
+        goal="verify execution and verification evidence",
         status="active",
         round=0,
         extra={},
@@ -213,10 +213,11 @@ def _make_scheduler(temp_dir: str) -> tuple[HarnessScheduler, Path, Path, Path]:
     )
     scheduler = HarnessScheduler(
         specs=[
-            {"id": "communication", "name": "Communication Agent", "order": 10, "dependencies": (), "goal": "Handle human-facing communication."},
-            {"id": "design", "name": "Design Agent", "order": 20, "dependencies": ("communication",), "goal": "Define the next approved slice."},
+            {"id": "decision", "name": "Decision Agent", "order": 10, "dependencies": (), "goal": "Triage ambiguous blockers."},
+            {"id": "design", "name": "Design Agent", "order": 20, "dependencies": ("decision",), "goal": "Define the next approved slice."},
             {"id": "execution", "name": "Execution Agent", "order": 30, "dependencies": ("design",), "goal": "Implement the approved slice."},
-            {"id": "audit", "name": "Audit Agent", "order": 40, "dependencies": ("execution",), "goal": "Audit the implementation slice."},
+            {"id": "verification", "name": "Verification Agent", "order": 40, "dependencies": ("execution",), "goal": "Verify the implementation slice."},
+            {"id": "cleanup", "name": "Cleanup Agent", "order": 50, "dependencies": ("verification",), "goal": "Clean transient runtime state after verification."},
         ],
         paths=paths,
         mission=mission,
@@ -695,6 +696,7 @@ class SchedulerVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             scheduler, _, _, _ = _make_scheduler(temp_dir)
             scheduler.state.active_agent = ""
+            scheduler.state.extra["last_cleanup_maintenance_at"] = utc_now()
             scheduler._set_pending_execution_brief(
                 {
                     "brief_id": "execution-resume-1",
@@ -712,6 +714,7 @@ class SchedulerVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             scheduler, _, _, _ = _make_scheduler(temp_dir)
             scheduler.state.active_agent = ""
+            scheduler.state.extra["last_cleanup_maintenance_at"] = utc_now()
             scheduler._set_pending_agent_brief(
                 "design",
                 {
@@ -754,34 +757,34 @@ class SchedulerVerificationTests(unittest.TestCase):
             self.assertEqual(pending_brief["decision"], "continue_current_slice")
             self.assertEqual(scheduler.state.active_agent, "design")
 
-    def test_audit_paused_report_stores_pending_brief_and_resumes_audit(self) -> None:
+    def test_verification_paused_report_stores_pending_brief_and_resumes_verification(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scheduler, paths, _, _ = _make_scheduler(temp_dir)
             scheduler._advance_after_report(
-                "audit",
+                "verification",
                 {
                     "cycle_id": "cycle-test",
-                    "handoff_path": str(paths.briefs_dir / "cycle-test-00-audit.json"),
-                    "report_path": str(paths.briefs_dir / "cycle-test-00-audit.json"),
+                    "handoff_path": str(paths.briefs_dir / "cycle-test-00-verification.json"),
+                    "report_path": str(paths.briefs_dir / "cycle-test-00-verification.json"),
                     "state_after": {"cycle_id": "cycle-test", "sequence": 1},
                     "report": {
                         "status": "running",
                         "audit_status": "paused",
                         "resume_brief": {
-                            "brief_id": "audit-resume-1",
+                            "brief_id": "verification-resume-1",
                             "decision": "continue_current_slice",
                             "slice_key": "plans/demo.md::phase 1",
-                            "summary": "Resume audit on the current slice.",
+                            "summary": "Resume verification on the current slice.",
                         },
                         "artifacts": [],
                     },
                 },
             )
 
-            pending_brief = scheduler._pending_agent_brief("audit")
+            pending_brief = scheduler._pending_agent_brief("verification")
             self.assertIsNotNone(pending_brief)
             self.assertEqual(pending_brief["decision"], "continue_current_slice")
-            self.assertEqual(scheduler.state.active_agent, "audit")
+            self.assertEqual(scheduler.state.active_agent, "verification")
 
     def test_human_reply_for_execution_gate_keeps_resume_session_in_pending_execution_brief(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -908,7 +911,7 @@ class SchedulerVerificationTests(unittest.TestCase):
         self.assertEqual(python_spec["command"][1], str(workspace_root / "main.py"))
         self.assertEqual(python_spec["command"][2:], ["--format", "json"])
 
-    def test_execution_records_subagent_and_verification_evidence_and_audit_accepts(self) -> None:
+    def test_execution_records_subagent_and_verification_evidence_and_verification_accepts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scheduler, paths, doc_root, project_root = _make_scheduler(temp_dir)
             design_artifact = paths.artifacts_dir / "cycle-test" / "00-design-contract.json"
@@ -964,10 +967,10 @@ class SchedulerVerificationTests(unittest.TestCase):
             self.assertEqual(execution_payload["execution_subagent"]["exit_code"], 0)
             self.assertEqual(execution_payload["execution_output"]["status"], "implemented")
 
-            audit_turn = RunnerTurn(
+            verification_turn = RunnerTurn(
                 cycle_id="cycle-test",
                 sequence=3,
-                agent_spec={"id": "audit", "name": "Audit Agent"},
+                agent_spec={"id": "verification", "name": "Verification Agent"},
                 handoff={
                     "inputs": {
                         "latest_artifacts": {"execution": [str(execution_artifact_path)]},
@@ -976,8 +979,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.briefs_dir / "cycle-test-03-audit.json",
-                report_path=paths.briefs_dir / "cycle-test-03-audit.json",
+                handoff_path=paths.briefs_dir / "cycle-test-03-verification.json",
+                report_path=paths.briefs_dir / "cycle-test-03-verification.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -985,16 +988,16 @@ class SchedulerVerificationTests(unittest.TestCase):
                 "lib.scheduler_components.turns.launch_background_agent",
                 side_effect=_launch_background_immediately,
             ):
-                audit_report = scheduler._execute_turn(audit_turn)
-            audit_artifact_path = Path(audit_report["artifacts"][-1])
-            audit_payload = json.loads(audit_artifact_path.read_text(encoding="utf-8"))
-            self.assertEqual(audit_report["status"], "accepted")
-            self.assertTrue(audit_payload["accepted"])
-            self.assertEqual(audit_payload["findings"], [])
-            self.assertEqual(audit_report["supervisor_event"]["kind"], "supervisor_route_outcome")
-            self.assertEqual(audit_report["supervisor_event"]["outcome"], "accept")
+                verification_report = scheduler._execute_turn(verification_turn)
+            verification_artifact_path = Path(verification_report["artifacts"][-1])
+            verification_payload = json.loads(verification_artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(verification_report["status"], "accepted")
+            self.assertTrue(verification_payload["accepted"])
+            self.assertEqual(verification_payload["findings"], [])
+            self.assertEqual(verification_report["supervisor_event"]["kind"], "supervisor_route_outcome")
+            self.assertEqual(verification_report["supervisor_event"]["outcome"], "accept")
 
-    def test_audit_reopens_when_verification_evidence_fails(self) -> None:
+    def test_verification_reopens_when_verification_evidence_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             scheduler, paths, _, project_root = _make_scheduler(temp_dir)
             design_artifact = paths.artifacts_dir / "cycle-test" / "00-design-contract.json"
@@ -1038,16 +1041,16 @@ class SchedulerVerificationTests(unittest.TestCase):
                 execution_report = scheduler._execute_turn(execution_turn)
 
             execution_artifact_path = Path(execution_report["artifacts"][-1])
-            audit_turn = RunnerTurn(
+            verification_turn = RunnerTurn(
                 cycle_id="cycle-test",
                 sequence=3,
-                agent_spec={"id": "audit", "name": "Audit Agent"},
+                agent_spec={"id": "verification", "name": "Verification Agent"},
                 handoff={"inputs": {"latest_artifacts": {"execution": [str(execution_artifact_path)]}}},
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.briefs_dir / "cycle-test-03-audit.json",
-                report_path=paths.briefs_dir / "cycle-test-03-audit.json",
+                handoff_path=paths.briefs_dir / "cycle-test-03-verification.json",
+                report_path=paths.briefs_dir / "cycle-test-03-verification.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -1055,14 +1058,14 @@ class SchedulerVerificationTests(unittest.TestCase):
                 "lib.scheduler_components.turns.launch_background_agent",
                 side_effect=_launch_background_immediately,
             ):
-                audit_report = scheduler._execute_turn(audit_turn)
-            audit_artifact_path = Path(audit_report["artifacts"][-1])
-            audit_payload = json.loads(audit_artifact_path.read_text(encoding="utf-8"))
-            self.assertEqual(audit_report["status"], "reopen_execution")
-            self.assertFalse(audit_payload["accepted"])
-            self.assertTrue(any("returned 3" in finding for finding in audit_payload["findings"]))
-            self.assertEqual(audit_report["supervisor_event"]["kind"], "supervisor_route_outcome")
-            self.assertEqual(audit_report["supervisor_event"]["outcome"], "reopen_execution")
+                verification_report = scheduler._execute_turn(verification_turn)
+            verification_artifact_path = Path(verification_report["artifacts"][-1])
+            verification_payload = json.loads(verification_artifact_path.read_text(encoding="utf-8"))
+            self.assertEqual(verification_report["status"], "reopen_execution")
+            self.assertFalse(verification_payload["accepted"])
+            self.assertTrue(any("returned 3" in finding for finding in verification_payload["findings"]))
+            self.assertEqual(verification_report["supervisor_event"]["kind"], "supervisor_route_outcome")
+            self.assertEqual(verification_report["supervisor_event"]["outcome"], "reopen_execution")
 
     def test_external_project_repeated_reopen_auto_replans_without_human_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

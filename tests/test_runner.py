@@ -91,15 +91,15 @@ class RunnerBridgeTests(unittest.TestCase):
             self.assertEqual(communication_state_file.parent.name, "communication")
             self.assertEqual(communication_state_file.parent.parent.name, "inbox")
 
-    def test_communication_agent_is_treated_like_a_regular_runner(self) -> None:
+    def test_decision_agent_is_treated_like_a_regular_runner(self) -> None:
         with TemporaryDirectory() as temp_dir:
             runtime_root = Path(temp_dir) / ".harness"
             bridge = RunnerBridge(runtime_root)
             result = bridge.run_agent(
-                {"id": "communication", "name": "Communication Surface", "goal": "Store raw human text."},
+                {"id": "decision", "name": "Decision Agent", "goal": "Triage ambiguous blockers."},
                 {"goal": "store raw human text", "inputs": {}, "decision_gate": {"title": "Need decision", "prompt": "Approve the mainline?"}},
                 mission={"goal": "store raw human text", "decision_gate": {"title": "Need decision", "prompt": "Approve the mainline?"}},
-                state={"runtime_root": str(runtime_root), "cycle_id": "cycle-communication", "last_agent": "supervisor"},
+                state={"runtime_root": str(runtime_root), "cycle_id": "cycle-decision", "last_agent": "supervisor"},
             )
 
             self.assertEqual(result["report"]["status"], "completed")
@@ -152,6 +152,18 @@ class CommunicationServerTests(unittest.TestCase):
                         "state": {"active_agent": "design"},
                         "agent_statuses": [
                             {
+                                "id": "decision",
+                                "name": "Decision Agent",
+                                "status": "waiting",
+                                "summary": "Waiting for a worker blocker that needs triage.",
+                                "waiting": "queued for supervisor",
+                                "blocked": True,
+                                "worktree": "C:/tmp/decision-worktree",
+                                "current_slice": "Phase 1",
+                                "current_brief": "Decision brief is ready for supervisor routing.",
+                                "details": [],
+                            },
+                            {
                                 "id": "design",
                                 "name": "Design Agent",
                                 "status": "planning",
@@ -174,15 +186,15 @@ class CommunicationServerTests(unittest.TestCase):
                                 "details": ["Phase 2"],
                             },
                             {
-                                "id": "audit",
-                                "name": "Audit Agent",
-                                "status": "waiting",
-                                "summary": "Waiting for supervisor routing.",
+                                "id": "verification",
+                                "name": "Verification Agent",
+                                "status": "waiting_verification",
+                                "summary": "Waiting to verify the latest execution artifact.",
                                 "waiting": "queued for supervisor",
                                 "blocked": True,
-                                "worktree": "C:/tmp/audit-worktree",
+                                "worktree": "C:/tmp/verification-worktree",
                                 "current_slice": "Phase 2",
-                                "current_brief": "Audit verdict is pending.",
+                                "current_brief": "Verification verdict is pending.",
                                 "details": [],
                             },
                         ],
@@ -204,7 +216,7 @@ class CommunicationServerTests(unittest.TestCase):
                 status, payload = _request_json(port, "GET", "/runtime")
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["runtime"]["state"]["active_agent"], "design")
-                self.assertEqual(payload["runtime"]["agent_statuses"][0]["id"], "design")
+                self.assertEqual(payload["runtime"]["agent_statuses"][0]["id"], "decision")
 
                 raw_message = "  hello communication agent  \n"
                 status, payload = _request_json(port, "POST", "/communication/messages", {"sender": "human", "body": raw_message})
@@ -241,14 +253,17 @@ class CommunicationServerTests(unittest.TestCase):
                 self.assertIn("Worktree", body)
                 self.assertIn("Current slice", body)
                 self.assertIn("Current brief", body)
+                self.assertIn("Decision Agent", body)
                 self.assertIn("C:/tmp/design-worktree", body)
                 self.assertIn("C:/tmp/execution-worktree", body)
-                self.assertIn("C:/tmp/audit-worktree", body)
+                self.assertIn("C:/tmp/decision-worktree", body)
+                self.assertIn("C:/tmp/verification-worktree", body)
                 self.assertIn("Phase 1", body)
                 self.assertIn("Phase 2", body)
                 self.assertIn("Refine the contract before execution.", body)
                 self.assertIn("Implement the approved slice in the worktree.", body)
-                self.assertIn("Audit verdict is pending.", body)
+                self.assertIn("Decision brief is ready for supervisor routing.", body)
+                self.assertIn("Verification verdict is pending.", body)
                 self.assertIn("Need decision", body)
                 self.assertIn("Approve the mainline?", body)
 

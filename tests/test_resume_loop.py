@@ -86,7 +86,7 @@ def _launch_background_immediately(**kwargs: object) -> dict[str, object]:
     agent_id = str(kwargs["agent_id"])
     if agent_id == "design":
         run_saved_design_request(**common_kwargs)
-    elif agent_id == "audit":
+    elif agent_id in {"verification", "audit"}:
         run_saved_audit_request(**common_kwargs)
     else:
         raise AssertionError(f"unexpected background agent: {agent_id}")
@@ -168,6 +168,11 @@ class ResumeLoopTests(unittest.TestCase):
                 second_pass = scheduler.run_until_stable(max_turns=12)
             self.assertEqual(second_pass.status, "completed")
             self.assertEqual(second_pass.state.current_round, 1)
+            human_decisions = scheduler.mission.extra.get("human_decisions", [])
+            self.assertEqual(len(human_decisions), 1)
+            self.assertIn("answer-", human_decisions[0]["id"])
+            self.assertNotIn("communication", json.dumps(human_decisions[0], ensure_ascii=False))
+            self.assertNotIn("audit", json.dumps(scheduler.mission.extra, ensure_ascii=False))
             self.assertTrue(paths.events_dir.exists())
             self.assertTrue(paths.sessions_dir.exists())
             self.assertTrue(paths.inbox_dir.exists())
