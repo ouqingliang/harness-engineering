@@ -424,3 +424,10 @@ summary: this blocker changes behavior and needs a human choice
 4. “继续同一个 session”从 execution lane 细节提升为统一 runtime contract；`resume` 不再作为上层独立语义暴露
 
 这才是更接近 Claude Code 实现细节、同时更适合本项目边界的 redesign 方向。
+
+## 10. 监控页面
+
+监控页面现在做的还不错，但是要注意：
+
+1. `communications agent` 已经没了，监控页面需要修改。
+2. 人类应该要非常清楚的知道每个 agent 的当前任务，以及有什么最终输出，这个需要在监控页面中展示。

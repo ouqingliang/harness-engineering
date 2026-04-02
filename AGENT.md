@@ -53,3 +53,10 @@ Escalate to the human only for:
 - unresolved priority conflicts
 
 Everything else should stay inside the autonomous loop.
+
+When you escalate, make sure to:
+
+- clearly explain the situation, do not just dump the problem
+- explain the situation in Chinese
+- explain the situation in detail, human do not know what you are fucking doing
+- provide options for the human to choose from, do not just ask a question
