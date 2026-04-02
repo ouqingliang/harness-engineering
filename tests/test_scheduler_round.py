@@ -146,7 +146,14 @@ class SchedulerRoundTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             _, memory_root, scheduler = self._seed_runtime(temp_path)
 
-            first_pass = scheduler.run_until_stable(max_turns=1)
+            with patch(
+                "lib.scheduler._launch_execution_subagent",
+                side_effect=_launch_execution_immediately,
+            ), patch(
+                "lib.scheduler_components.turns.launch_background_agent",
+                side_effect=_launch_background_immediately,
+            ):
+                first_pass = scheduler.run_until_stable(max_turns=1)
             self.assertEqual(len(first_pass.steps), 1)
 
             first_step = first_pass.steps[0]
@@ -224,8 +231,8 @@ class SchedulerRoundTests(unittest.TestCase):
                 side_effect=[
                     {
                         "cycle_id": "cycle-rerun",
-                        "handoff_path": str(scheduler.paths.handoffs_dir / "cycle-rerun-00-design.json"),
-                        "report_path": str(scheduler.paths.reports_dir / "cycle-rerun-00-design.json"),
+                        "handoff_path": str(scheduler.paths.briefs_dir / "cycle-rerun-00-design.json"),
+                        "report_path": str(scheduler.paths.briefs_dir / "cycle-rerun-00-design.json"),
                         "state_after": {"cycle_id": "cycle-rerun", "sequence": 1},
                         "report": {
                             "status": "blocked",
@@ -247,8 +254,8 @@ class SchedulerRoundTests(unittest.TestCase):
                     },
                     {
                         "cycle_id": "cycle-rerun",
-                        "handoff_path": str(scheduler.paths.handoffs_dir / "cycle-rerun-01-design.json"),
-                        "report_path": str(scheduler.paths.reports_dir / "cycle-rerun-01-design.json"),
+                        "handoff_path": str(scheduler.paths.briefs_dir / "cycle-rerun-01-design.json"),
+                        "report_path": str(scheduler.paths.briefs_dir / "cycle-rerun-01-design.json"),
                         "state_after": {"cycle_id": "cycle-rerun", "sequence": 2},
                         "report": {
                             "status": "completed",
@@ -303,7 +310,7 @@ class SchedulerRoundTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             _, memory_root, scheduler = self._seed_runtime(temp_path)
             stale_slice_key = f"design::{scheduler._selected_primary_doc() or 'README.md'}"
-            launcher_dir = scheduler.paths.launchers_dir / "design"
+            launcher_dir = scheduler.paths.artifacts_dir / "launchers" / "design"
             launcher_dir.mkdir(parents=True, exist_ok=True)
             launcher_state_path = launcher_dir / "state.json"
             launcher_state_path.write_text(

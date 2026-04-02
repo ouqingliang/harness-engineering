@@ -424,8 +424,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
-                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                handoff_path=paths.briefs_dir / "cycle-test-02-execution.json",
+                report_path=paths.briefs_dir / "cycle-test-02-execution.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -498,8 +498,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
-                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                handoff_path=paths.briefs_dir / "cycle-test-02-execution.json",
+                report_path=paths.briefs_dir / "cycle-test-02-execution.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -575,8 +575,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
-                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                handoff_path=paths.briefs_dir / "cycle-test-02-execution.json",
+                report_path=paths.briefs_dir / "cycle-test-02-execution.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -635,8 +635,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
-                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                handoff_path=paths.briefs_dir / "cycle-test-02-execution.json",
+                report_path=paths.briefs_dir / "cycle-test-02-execution.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -732,8 +732,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 "design",
                 {
                     "cycle_id": "cycle-test",
-                    "handoff_path": str(paths.handoffs_dir / "cycle-test-00-design.json"),
-                    "report_path": str(paths.reports_dir / "cycle-test-00-design.json"),
+                    "handoff_path": str(paths.briefs_dir / "cycle-test-00-design.json"),
+                    "report_path": str(paths.briefs_dir / "cycle-test-00-design.json"),
                     "state_after": {"cycle_id": "cycle-test", "sequence": 1},
                     "report": {
                         "status": "running",
@@ -761,8 +761,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 "audit",
                 {
                     "cycle_id": "cycle-test",
-                    "handoff_path": str(paths.handoffs_dir / "cycle-test-00-audit.json"),
-                    "report_path": str(paths.reports_dir / "cycle-test-00-audit.json"),
+                    "handoff_path": str(paths.briefs_dir / "cycle-test-00-audit.json"),
+                    "report_path": str(paths.briefs_dir / "cycle-test-00-audit.json"),
                     "state_after": {"cycle_id": "cycle-test", "sequence": 1},
                     "report": {
                         "status": "running",
@@ -947,8 +947,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
-                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                handoff_path=paths.briefs_dir / "cycle-test-02-execution.json",
+                report_path=paths.briefs_dir / "cycle-test-02-execution.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -976,8 +976,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-03-audit.json",
-                report_path=paths.reports_dir / "cycle-test-03-audit.json",
+                handoff_path=paths.briefs_dir / "cycle-test-03-audit.json",
+                report_path=paths.briefs_dir / "cycle-test-03-audit.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -1024,8 +1024,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-02-execution.json",
-                report_path=paths.reports_dir / "cycle-test-02-execution.json",
+                handoff_path=paths.briefs_dir / "cycle-test-02-execution.json",
+                report_path=paths.briefs_dir / "cycle-test-02-execution.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -1044,8 +1044,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-test-03-audit.json",
-                report_path=paths.reports_dir / "cycle-test-03-audit.json",
+                handoff_path=paths.briefs_dir / "cycle-test-03-audit.json",
+                report_path=paths.briefs_dir / "cycle-test-03-audit.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -1124,8 +1124,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-replan-00-design.json",
-                report_path=paths.reports_dir / "cycle-replan-00-design.json",
+                handoff_path=paths.briefs_dir / "cycle-replan-00-design.json",
+                report_path=paths.briefs_dir / "cycle-replan-00-design.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
@@ -1170,8 +1170,8 @@ class SchedulerVerificationTests(unittest.TestCase):
                 runtime_paths={},
                 mission=scheduler.mission.to_mapping(),
                 state=scheduler.state.to_mapping(),
-                handoff_path=paths.handoffs_dir / "cycle-replan-00-design.json",
-                report_path=paths.reports_dir / "cycle-replan-00-design.json",
+                handoff_path=paths.briefs_dir / "cycle-replan-00-design.json",
+                report_path=paths.briefs_dir / "cycle-replan-00-design.json",
                 communication_store=CommunicationStore(paths.harness_root),
             )
 
