@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 from ..project_context import project_root_from_doc_root
 from ..runtime_state import coerce_bool, coerce_int, coerce_str, utc_now
 from ..runner_bridge import RunnerTurn
+from .decision import _execute_decision_turn
 from .background_runtime import launch_background_agent, load_launcher_status, running_status
 from .support import DEFAULT_EXECUTION_OUTPUT, _normalize_text_list, _write_json
 
@@ -88,8 +89,14 @@ def execute_turn(
             verification_scope_findings=verification_scope_findings,
             verification_specs=verification_specs,
         )
-    if agent_id == scheduler.audit_agent_id:
-        return _execute_audit_turn(
+    if agent_id in {scheduler.decision_agent_id, "communication"}:
+        return _execute_decision_turn(
+            scheduler,
+            turn,
+            turn.handoff.get("inputs", {}),
+        )
+    if agent_id in {scheduler.verification_agent_id, "audit"}:
+        return _execute_verification_turn(
             scheduler,
             turn,
             latest_artifacts=latest_artifacts,
@@ -290,15 +297,31 @@ def _execute_design_turn(
             "recorded_at": utc_now(),
         }
         _write_json(request_artifact_path, request_payload)
-        launch_result = launch_background_agent(
-            agent_id=agent_id,
-            workspace_root=design_workspace_root,
-            request_path=request_artifact_path,
-            result_path=result_artifact_path,
-            launcher_state_path=launcher_state_path,
-            launcher_run_path=launcher_run_path,
-            started_at=coerce_str(request_payload.get("recorded_at")).strip() or utc_now(),
-        )
+        launch_agent_id = agent_id
+        try:
+            launch_result = launch_background_agent(
+                agent_id=launch_agent_id,
+                workspace_root=design_workspace_root,
+                request_path=request_artifact_path,
+                result_path=result_artifact_path,
+                launcher_state_path=launcher_state_path,
+                launcher_run_path=launcher_run_path,
+                started_at=coerce_str(request_payload.get("recorded_at")).strip() or utc_now(),
+            )
+        except AssertionError:
+            if launch_agent_id != "audit":
+                launch_agent_id = "audit"
+                launch_result = launch_background_agent(
+                    agent_id=launch_agent_id,
+                    workspace_root=design_workspace_root,
+                    request_path=request_artifact_path,
+                    result_path=result_artifact_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                    started_at=coerce_str(request_payload.get("recorded_at")).strip() or utc_now(),
+                )
+            else:
+                raise
         scheduler._upsert_running_agent(
             {
                 "agent_id": agent_id,
@@ -858,7 +881,7 @@ def _execute_execution_turn(
     )
     scheduler._append_recent_event(
         kind="execution_completed",
-        summary=f"Execution finished for {phase_title}; waiting for audit.",
+        summary=f"Execution finished for {phase_title}; waiting for verification.",
         details={"slice_key": slice_key, "execution_artifact_path": str(artifact_path)},
     )
     return {
@@ -894,11 +917,11 @@ def _execute_audit_turn(
     execution_artifacts = latest_artifacts.get("execution", [])
     if not execution_artifact_path and execution_artifacts:
         execution_artifact_path = str(execution_artifacts[-1])
-    agent_id = scheduler.audit_agent_id or "audit"
+    agent_id = scheduler.verification_agent_id or "verification"
     design_contract = {}
     canonical_project_root = project_root_from_doc_root(Path(turn.mission.get("doc_root", scheduler.paths.memory_root)).resolve())
-    slice_key = execution_artifact_path or f"audit::{turn.cycle_id}"
-    phase_title = "audit"
+    slice_key = execution_artifact_path or f"verification::{turn.cycle_id}"
+    phase_title = "verification"
     if execution_artifact_path:
         execution_plan = scheduler._load_json(execution_artifact_path)
         design_contract = execution_plan.get("design_contract", {})
@@ -908,7 +931,7 @@ def _execute_audit_turn(
             ).resolve()
             selected_phase = design_contract.get("selected_phase", {})
             if isinstance(selected_phase, Mapping):
-                phase_title = coerce_str(selected_phase.get("title")).strip() or "audit"
+                phase_title = coerce_str(selected_phase.get("title")).strip() or "verification"
             slice_key = coerce_str(design_contract.get("slice_key")).strip() or slice_key
     existing_run = scheduler._find_running_agent(agent_id, slice_key)
     worktree_entry = scheduler._ensure_agent_worktree(
@@ -918,10 +941,10 @@ def _execute_audit_turn(
         phase_title=phase_title,
     )
     audit_workspace_root = Path(coerce_str(worktree_entry.get("path")).strip()).resolve()
-    launcher_dir = scheduler.paths.artifacts_dir / "launchers" / "audit"
+    launcher_dir = scheduler.paths.artifacts_dir / "launchers" / "verification"
     if existing_run is None:
-        request_artifact_path = scheduler._artifact_path(turn, "audit-request")
-        result_artifact_path = scheduler._artifact_path(turn, "audit-result")
+        request_artifact_path = scheduler._artifact_path(turn, "verification-request")
+        result_artifact_path = scheduler._artifact_path(turn, "verification-result")
         launcher_state_path = launcher_dir / "state.json"
         launcher_run_path = launcher_dir / "runs" / f"{turn.cycle_id}-{turn.sequence:02d}.json"
     else:
@@ -938,15 +961,31 @@ def _execute_audit_turn(
             "recorded_at": utc_now(),
         }
         _write_json(request_artifact_path, request_payload)
-        launch_result = launch_background_agent(
-            agent_id=agent_id,
-            workspace_root=audit_workspace_root,
-            request_path=request_artifact_path,
-            result_path=result_artifact_path,
-            launcher_state_path=launcher_state_path,
-            launcher_run_path=launcher_run_path,
-            started_at=coerce_str(request_payload.get("recorded_at")).strip() or utc_now(),
-        )
+        launch_agent_id = agent_id
+        try:
+            launch_result = launch_background_agent(
+                agent_id=launch_agent_id,
+                workspace_root=audit_workspace_root,
+                request_path=request_artifact_path,
+                result_path=result_artifact_path,
+                launcher_state_path=launcher_state_path,
+                launcher_run_path=launcher_run_path,
+                started_at=coerce_str(request_payload.get("recorded_at")).strip() or utc_now(),
+            )
+        except AssertionError:
+            if launch_agent_id != "audit":
+                launch_agent_id = "audit"
+                launch_result = launch_background_agent(
+                    agent_id=launch_agent_id,
+                    workspace_root=audit_workspace_root,
+                    request_path=request_artifact_path,
+                    result_path=result_artifact_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                    started_at=coerce_str(request_payload.get("recorded_at")).strip() or utc_now(),
+                )
+            else:
+                raise
         scheduler._upsert_running_agent(
             {
                 "agent_id": agent_id,
@@ -960,20 +999,21 @@ def _execute_audit_turn(
                 "launcher_run_path": str(launcher_run_path),
                 "project_root": str(canonical_project_root),
                 "worktree_path": str(audit_workspace_root),
-                "brief": f"audit {phase_title}",
+                "brief": f"verification {phase_title}",
                 "pid": launch_result.get("pid"),
             }
         )
         scheduler._append_recent_event(
-            kind="audit_launch",
-            summary=f"Audit launched in background for {phase_title}.",
+            kind="verification_launch",
+            summary=f"Verification launched in background for {phase_title}.",
             details={"slice_key": slice_key, "worktree_path": str(audit_workspace_root)},
         )
         if launch_result.get("ok") and not result_artifact_path.exists():
             return {
                 "status": "running",
-                "summary": f"Audit launched in background for {phase_title}.",
+                "summary": f"Verification launched in background for {phase_title}.",
                 "audit_status": "launched",
+                "verification_status": "launched",
                 "artifacts": [str(request_artifact_path)],
             }
     launcher_status = load_launcher_status(launcher_state_path)
@@ -986,11 +1026,12 @@ def _execute_audit_turn(
                 slice_key=slice_key,
                 canonical_project_root=str(canonical_project_root),
             )
-            failure_reason = coerce_str(launcher_status.get("stale_reason")).strip() or f"audit background worker exited without writing a result artifact for {phase_title}"
+            failure_reason = coerce_str(launcher_status.get("stale_reason")).strip() or f"verification background worker exited without writing a result artifact for {phase_title}"
             return {
                 "status": "failed",
-                "summary": "Audit background worker failed.",
+                "summary": "Verification background worker failed.",
                 "audit_status": "failed",
+                "verification_status": "failed",
                 "artifacts": [str(request_artifact_path)],
                 "failure_reason": failure_reason,
             }
@@ -1007,13 +1048,14 @@ def _execute_audit_turn(
                 "launcher_run_path": str(launcher_run_path),
                 "project_root": str(canonical_project_root),
                 "worktree_path": str(audit_workspace_root),
-                "brief": f"audit {phase_title}",
+                "brief": f"verification {phase_title}",
             }
         )
         return {
             "status": "running",
-            "summary": f"Audit is still running in background for {phase_title}.",
+            "summary": f"Verification is still running in background for {phase_title}.",
             "audit_status": "running",
+            "verification_status": "running",
             "artifacts": [str(request_artifact_path)],
         }
     try:
@@ -1021,8 +1063,9 @@ def _execute_audit_turn(
     except json.JSONDecodeError:
         return {
             "status": "running",
-            "summary": f"Audit is finalizing artifacts for {phase_title}.",
+            "summary": f"Verification is finalizing artifacts for {phase_title}.",
             "audit_status": "running",
+            "verification_status": "running",
             "artifacts": [str(request_artifact_path)],
         }
     scheduler._remove_running_agent(agent_id, slice_key)
@@ -1034,8 +1077,9 @@ def _execute_audit_turn(
     if not coerce_bool(audit_result.get("ok"), False):
         return {
             "status": "failed",
-            "summary": "Audit background worker failed.",
+            "summary": "Verification background worker failed.",
             "audit_status": "failed",
+            "verification_status": "failed",
             "artifacts": [str(request_artifact_path), str(result_artifact_path)],
         }
     artifact_path = scheduler._artifact_path(turn, "verdict")
@@ -1043,6 +1087,7 @@ def _execute_audit_turn(
         artifact_path,
         {
             "audit_status": audit_result.get("audit_status", "reopen_execution"),
+            "verification_status": audit_result.get("audit_status", "reopen_execution"),
             "accepted": coerce_bool(audit_result.get("accepted"), False),
             "findings": audit_result.get("findings", []),
             "verification_commands": audit_result.get("verification_commands", []),
@@ -1059,7 +1104,7 @@ def _execute_audit_turn(
             "slice_key": slice_key,
             "phase_title": phase_title,
             "status": "waiting_supervisor",
-            "summary": f"Audit completed for {phase_title}.",
+            "summary": f"Verification completed for {phase_title}.",
         }
     )
     audit_status = coerce_str(audit_result.get("audit_status")).strip() or "reopen_execution"
@@ -1069,10 +1114,10 @@ def _execute_audit_turn(
         "replan_design": "replan_design",
     }.get(audit_status, "route_to_decision")
     audit_summary = {
-        "accepted": "Audit accepted the current round.",
-        "reopen_execution": "Audit reopened the round and returned it to execution.",
-        "replan_design": "Audit requested a new design contract before execution can continue.",
-    }.get(audit_status, "Audit completed.")
+        "accepted": "Verification accepted the current round.",
+        "reopen_execution": "Verification reopened the round and returned it to execution.",
+        "replan_design": "Verification requested a new design contract before execution can continue.",
+    }.get(audit_status, "Verification completed.")
     return {
         "status": audit_status,
         "summary": audit_summary,
@@ -1080,19 +1125,22 @@ def _execute_audit_turn(
             kind="supervisor_route_outcome",
             summary=audit_summary,
             outcome=route_outcome,
-            subject="audit",
+            subject="verification",
             details={
                 "audit_status": audit_status,
+                "verification_status": audit_status,
                 "execution_artifact_path": audit_result.get("execution_artifact_path", execution_artifact_path),
             },
         ),
         "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
         "audit_status": audit_status,
+        "verification_status": audit_status,
         "findings": audit_result.get("findings", []),
         "design_contract": audit_result.get("design_contract", {}),
         "verification_commands": audit_result.get("verification_commands", []),
         "execution_artifact_path": audit_result.get("execution_artifact_path", execution_artifact_path),
     }
+
 
 
 def _execute_cleanup_turn(
@@ -1138,5 +1186,5 @@ def _execute_cleanup_turn(
         "artifacts": [str(artifact_path)],
     }
 
-
-
+_execute_communication_turn = _execute_decision_turn
+_execute_verification_turn = _execute_audit_turn

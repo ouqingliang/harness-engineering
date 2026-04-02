@@ -7,7 +7,7 @@
 
 The verification agent owns independent verification for the current round.
 
-It checks whether the execution result satisfies the approved contract and then reports a verdict to the supervisor.
+It checks whether the execution result satisfies the approved contract and then reports a verdict to the supervisor. Cleanup is only safe after a pass or an explicit recovery branch.
 
 ## Owned Truths
 
@@ -104,7 +104,7 @@ The verification agent does not route work to another worker and does not open h
 
 ## Round Behavior
 
-A verification round is a focused read-only pass over one approved slice.
+A verification round is a focused read-only pass over one approved slice. In the normal path, cleanup follows a `PASS`, not a failed or partial result.
 
 The agent may run multiple checks inside the round, but the round ends with one clear verdict and evidence bundle.
 
@@ -127,4 +127,3 @@ If the repo state changes during verification, the agent treats that as a contra
 - do not blur `PASS`, `FAIL`, and `PARTIAL`
 - do not present incomplete evidence as final acceptance
 - do not replace verification with a casual code review
-

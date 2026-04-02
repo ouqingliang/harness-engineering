@@ -6,7 +6,7 @@
 
 ## Purpose
 
-This directory expands the frozen baseline in [`../harness-architecture-redesign.md`](../harness-architecture-redesign.md) into a detailed design set.
+This directory expands the frozen baseline in [`../harness-architecture-redesign.md`](../harness-architecture-redesign.md) into a detailed design set for the target worker set: decision, design, execution, verification, and cleanup.
 
 The baseline file is the source of truth for the target architecture and is not rewritten here. These files provide the supporting detail for that baseline.
 
@@ -29,13 +29,11 @@ It keeps the unified session contract small, pushes durable evidence into file-b
 - [`02-supervisor-runtime.md`](./02-supervisor-runtime.md)
   - defines supervisor coordination, state flow, and routing outcomes
 - [`03-worker-session-contract.md`](./03-worker-session-contract.md)
-  - defines the shared worker contract for research, design, execution, verification, decision, and cleanup work
+  - defines the shared worker contract for decision, design, execution, verification, and cleanup work
 - [`04-human-gate-and-communication-surface.md`](./04-human-gate-and-communication-surface.md)
   - defines the human communication surface and gate relationship
 - [`agents/decision-agent.md`](./agents/decision-agent.md)
   - defines decision-agent responsibilities
-- [`agents/research-agent.md`](./agents/research-agent.md)
-  - defines the research-agent role
 - [`agents/design-agent.md`](./agents/design-agent.md)
   - defines the design-agent role
 - [`agents/execution-agent.md`](./agents/execution-agent.md)
@@ -66,6 +64,7 @@ The redesign baseline is frozen.
 - Do not reinterpret the baseline as a moving target.
 - Do not reintroduce legacy role names as current-state target roles.
 - Do not add alternate communication paths when the baseline already names the supervisor as the control plane.
+- Do not turn the human communication surface into a worker lane.
 
 ## Writing Convention
 

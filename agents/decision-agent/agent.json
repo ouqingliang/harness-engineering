@@ -1,0 +1,14 @@
+{
+  "id": "decision",
+  "name": "Decision Agent",
+  "description": "Owns blocker triage, semantic judgment, and human-gate interpretation.",
+  "enabled": true,
+  "order": 10,
+  "task": {
+    "id": "decision",
+    "title": "Triage blockers and normalize decisions",
+    "goal": "Classify ambiguous blockers, decide whether human judgment is required, and return a thin decision that the supervisor can route without turning the worker into a human communication lane.",
+    "system_prompt_path": "system.md"
+  },
+  "dependencies": []
+}

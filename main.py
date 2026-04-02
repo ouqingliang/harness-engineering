@@ -62,8 +62,10 @@ def load_agent_spec(path: Path) -> AgentSpec:
 
 def load_all_specs() -> list[AgentSpec]:
     specs: list[AgentSpec] = []
-    for agent_json in sorted(AGENTS_DIR.glob("*-agent/agent.json")):
-        specs.append(load_agent_spec(agent_json))
+    for agent_id in ("decision", "design", "execution", "verification", "cleanup"):
+        agent_json = AGENTS_DIR / f"{agent_id}-agent" / "agent.json"
+        if agent_json.exists():
+            specs.append(load_agent_spec(agent_json))
     if not specs:
         raise HarnessConfigError(f"no agent specs found under {AGENTS_DIR}")
     return sorted(specs, key=lambda item: (item.order, item.agent_id))

@@ -1,14 +1,14 @@
 # Decision Agent
 
 > Document type: role design
-> Purpose: define the blocker-triage and semantic-judgment lane for human-needed decisions
+> Purpose: define the blocker-triage lane for supervisor-owned decisions
 > Scope: `harness-engineering/memory/doc/architecture/harness-architecture-detailed/agents/`
 
 ## Role Purpose
 
 `decision-agent` exists to make a thin judgment when the current round hits an ambiguity that the `supervisor` cannot safely resolve alone.
 
-Its job is not to solve the whole problem. Its job is to classify the blocker, decide whether the issue is truly human-needed, and return a short, usable decision that lets the `supervisor` move the round forward.
+Its job is not to solve the whole problem. Its job is to classify the blocker, decide whether the issue is truly human-needed, and return a short, usable decision that lets the `supervisor` move the round forward. It does not become the human communication surface.
 
 ## Owned Truths
 
@@ -30,6 +30,7 @@ It is the authoritative role for "what does this blocker mean" and "what should 
 - implementation details
 - repository edits
 - direct human communication
+- the human communication surface
 - gate execution
 
 It may interpret context, but it does not become the source of truth for mission scope, execution order, or verification verdicts.

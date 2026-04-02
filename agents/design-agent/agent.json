@@ -11,6 +11,6 @@
     "system_prompt_path": "system.md"
   },
   "dependencies": [
-    "communication"
+    "decision"
   ]
 }

@@ -4,12 +4,16 @@ The supervisor routes work through durable JSON work orders and supervisor-facin
 
 ## Required Handoffs
 
+- `supervisor` -> `decision-agent`
+  - blocker text, semantic ambiguity, human-reply context
+- `decision-agent` -> `supervisor`
+  - decision note, short brief, reply interpretation
 - `design-agent` -> `execution-agent`
   - design contract, implementation slice, acceptance criteria
-- `execution-agent` -> `audit-agent`
+- `execution-agent` -> `verification-agent`
   - code changes, verification evidence, unresolved risks
-- `audit-agent` -> `supervisor`
-  - verification verdict and one of the frozen routing outcomes
+- `verification-agent` -> `supervisor`
+  - verification verdict and evidence
 - `worker` -> `supervisor`
   - worker completion, blocker, or human-gate event
 
@@ -18,7 +22,7 @@ The supervisor routes work through durable JSON work orders and supervisor-facin
 - worker completion is reported as `worker_completed`
 - worker blockers are reported as `worker_blocked`
 - human-gate openings are reported as `human_gate_opened`
-- audit verdicts are reported as `supervisor_route_outcome`
+- verification verdicts are reported as `supervisor_route_outcome`
 - the supervisor owns the final routing outcome and records it as one of `accept`, `reopen_execution`, `replan_design`, or `route_to_decision`
 
 ## Runtime Namespace

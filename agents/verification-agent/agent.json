@@ -1,0 +1,16 @@
+{
+  "id": "verification",
+  "name": "Verification Agent",
+  "description": "Owns read-only verification and acceptance evidence.",
+  "enabled": true,
+  "order": 40,
+  "task": {
+    "id": "verification",
+    "title": "Verify the approved slice",
+    "goal": "Run read-only checks against the execution result, determine whether the approved slice passes, fails, or is incomplete, and report evidence back to the supervisor.",
+    "system_prompt_path": "system.md"
+  },
+  "dependencies": [
+    "execution"
+  ]
+}

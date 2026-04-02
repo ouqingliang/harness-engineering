@@ -243,6 +243,10 @@ def _apply_verification_constraints(
         "不阻塞",
         "既有失败",
         "直接相关",
+        "temporary ignore",
+        "not blocking",
+        "existing failure",
+        "directly related",
     )
     if "engineer/access" in constraint_text and any(marker in constraint_text for marker in soft_block_markers):
         for spec in list(blocking):
@@ -712,14 +716,30 @@ class HarnessScheduler:
             communication_store=self.communication_store,
             turn_executor=self._execute_turn,
         )
-        self.communication_agent_id = "communication" if "communication" in self.specs_by_id else None
+        self.decision_agent_id = "decision" if "decision" in self.specs_by_id else ("communication" if "communication" in self.specs_by_id else None)
         self.design_agent_id = "design" if "design" in self.specs_by_id else None
         self.execution_agent_id = "execution" if "execution" in self.specs_by_id else None
-        self.audit_agent_id = "audit" if "audit" in self.specs_by_id else None
+        self.verification_agent_id = "verification" if "verification" in self.specs_by_id else ("audit" if "audit" in self.specs_by_id else None)
         self.cleanup_agent_id = "cleanup" if "cleanup" in self.specs_by_id else None
         self._refresh_doc_bundle()
         self._ensure_runtime_defaults()
         self._save_runtime()
+
+    @property
+    def communication_agent_id(self) -> str | None:
+        return self.decision_agent_id
+
+    @property
+    def audit_agent_id(self) -> str | None:
+        return self.verification_agent_id
+
+    def _normalize_role_agent_id(self, agent_id: str) -> str:
+        normalized = coerce_str(agent_id).strip()
+        if normalized == "communication" and self.decision_agent_id and self.decision_agent_id != "communication":
+            return self.decision_agent_id
+        if normalized == "audit" and self.verification_agent_id and self.verification_agent_id != "audit":
+            return self.verification_agent_id
+        return normalized
 
     def _refresh_doc_bundle(self) -> None:
         bundle = build_doc_bundle(self.mission.doc_root)
@@ -776,7 +796,7 @@ class HarnessScheduler:
                 {
                     **dict(item),
                     "agent_id": coerce_str(item.get("agent_id")).strip() or (self.execution_agent_id or "execution"),
-                    "status": coerce_str(item.get("status")).strip() or "waiting_audit",
+                    "status": coerce_str(item.get("status")).strip() or "waiting_verification",
                 }
                 for item in legacy_execution_queue
                 if isinstance(item, Mapping)
@@ -803,8 +823,10 @@ class HarnessScheduler:
         self.state.extra.setdefault("status", "running")
         if "last_cleanup_maintenance_at" not in self.state.extra:
             self.state.extra["last_cleanup_maintenance_at"] = self.state.last_run_at or utc_now()
-        if self.state.active_agent == self.communication_agent_id:
-            self.state.active_agent = ""
+        if self.state.active_agent == "communication" and self.decision_agent_id:
+            self.state.active_agent = self.decision_agent_id
+        elif self.state.active_agent == "audit" and self.verification_agent_id:
+            self.state.active_agent = self.verification_agent_id
         elif self.state.active_agent == self.cleanup_agent_id and not self._cleanup_mode():
             self.state.active_agent = self._default_work_entry_agent()
         elif self.state.active_agent and self.state.active_agent not in self.specs_by_id:
@@ -815,8 +837,11 @@ class HarnessScheduler:
         save_mission(self.paths.memory_root, self.mission)
         save_state(self.paths.memory_root, self.state)
 
+    def _clear_verification_reopen_tracking(self) -> None:
+        self.state.extra.pop("verification_reopen_streak", None)
+
     def _clear_audit_reopen_tracking(self) -> None:
-        self.state.extra.pop("audit_reopen_streak", None)
+        self._clear_verification_reopen_tracking()
 
     def _record_completed_slice(self, design_contract: Mapping[str, Any]) -> None:
         slice_key = coerce_str(design_contract.get("slice_key")).strip()
@@ -841,7 +866,7 @@ class HarnessScheduler:
         )
         self.mission.extra["completed_slices"] = completed
 
-    def _record_audit_reopen(self, findings: Sequence[Any], *, design_contract: Mapping[str, Any]) -> int:
+    def _record_verification_reopen(self, findings: Sequence[Any], *, design_contract: Mapping[str, Any]) -> int:
         signature = json.dumps(
             {
                 "execution_scope": coerce_str(design_contract.get("execution_scope")).strip(),
@@ -851,12 +876,15 @@ class HarnessScheduler:
             ensure_ascii=False,
             sort_keys=True,
         )
-        previous_signature = coerce_str(self.state.extra.get("last_audit_failure_signature")).strip()
-        previous_streak = coerce_int(self.state.extra.get("audit_reopen_streak"), 0)
+        previous_signature = coerce_str(self.state.extra.get("last_verification_failure_signature")).strip()
+        previous_streak = coerce_int(self.state.extra.get("verification_reopen_streak"), 0)
         streak = previous_streak + 1 if signature and signature == previous_signature else 1
-        self.state.extra["last_audit_failure_signature"] = signature
-        self.state.extra["audit_reopen_streak"] = streak
+        self.state.extra["last_verification_failure_signature"] = signature
+        self.state.extra["verification_reopen_streak"] = streak
         return streak
+
+    def _record_audit_reopen(self, findings: Sequence[Any], *, design_contract: Mapping[str, Any]) -> int:
+        return self._record_verification_reopen(findings, design_contract=design_contract)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -915,11 +943,11 @@ class HarnessScheduler:
             self.state.extra["sequence"] = sequence
 
     def _default_work_entry_agent(self) -> str:
-        for candidate in (self.design_agent_id, self.execution_agent_id, self.audit_agent_id):
+        for candidate in (self.design_agent_id, self.execution_agent_id, self.verification_agent_id):
             if candidate:
                 return candidate
         for spec in self.specs:
-            if spec["id"] not in {self.communication_agent_id, self.cleanup_agent_id}:
+            if spec["id"] not in {self.decision_agent_id, self.cleanup_agent_id}:
                 return spec["id"]
         return self.specs[0]["id"]
 
@@ -1416,6 +1444,21 @@ class HarnessScheduler:
                 elif active_agent == agent_id:
                     entry["status"] = "planning"
                     entry["summary"] = "Preparing the current design contract."
+            elif agent_id == self.decision_agent_id:
+                if running_for_agent:
+                    entry["status"] = "running"
+                    entry["summary"] = "Decision is triaging blockers in the background."
+                elif pending_brief:
+                    entry["status"] = "paused"
+                    entry["summary"] = current_brief or "Decision paused on the current gate and is ready to resume."
+                elif queued_for_agent:
+                    titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in queued_for_agent]
+                    entry["status"] = "queued"
+                    entry["summary"] = "A completed decision artifact is waiting for supervisor routing."
+                    entry["details"] = [item for item in titles if item][:3]
+                elif active_agent == agent_id:
+                    entry["status"] = "triaging"
+                    entry["summary"] = "Triaging a semantic blocker or human gate."
             elif agent_id == self.execution_agent_id:
                 if running_for_agent:
                     titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in running_for_agent]
@@ -1431,8 +1474,8 @@ class HarnessScheduler:
                         entry["details"].append(f"worktree={worktree_paths[0]}")
                 elif queued_for_agent:
                     titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in queued_for_agent]
-                    entry["status"] = "waiting_audit"
-                    entry["summary"] = "Execution finished and is waiting for audit."
+                    entry["status"] = "waiting_verification"
+                    entry["summary"] = "Execution finished and is waiting for verification."
                     entry["details"] = [item for item in titles if item][:3]
                 elif pending_brief:
                     decision = coerce_str(pending_brief.get("decision")).strip().lower()
@@ -1440,7 +1483,7 @@ class HarnessScheduler:
                     entry["summary"] = current_brief or (
                         "Execution paused on the current slice and is ready to resume."
                         if entry["status"] == "paused"
-                        else "Supervisor routed the latest audit findings back to execution."
+                        else "Supervisor routed the latest verification findings back to execution."
                     )
                     entry["details"] = _normalize_text_list(pending_brief.get("findings", []))[:3]
                 elif active_agent == agent_id:
@@ -1449,25 +1492,25 @@ class HarnessScheduler:
                 elif latest_phase_title:
                     entry["status"] = "ready"
                     entry["summary"] = f"Ready to execute {latest_phase_title}."
-            elif agent_id == self.audit_agent_id:
+            elif agent_id == self.verification_agent_id:
                 if running_for_agent:
                     entry["status"] = "running"
-                    entry["summary"] = "Audit is reviewing evidence in the background."
+                    entry["summary"] = "Verification is reviewing evidence in the background."
                 elif pending_brief:
                     entry["status"] = "paused"
-                    entry["summary"] = current_brief or "Audit paused on the current slice and is ready to resume."
+                    entry["summary"] = current_brief or "Verification paused on the current slice and is ready to resume."
                 elif queued_for_agent:
                     titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in queued_for_agent]
                     entry["status"] = "queued"
-                    entry["summary"] = "A completed audit verdict is waiting for supervisor routing."
+                    entry["summary"] = "A completed verification verdict is waiting for supervisor routing."
                     entry["details"] = [item for item in titles if item][:3]
                 elif self._completed_execution_queue():
                     titles = [coerce_str(item.get("phase_title")).strip() or coerce_str(item.get("slice_key")).strip() for item in self._completed_execution_queue()]
                     entry["status"] = "queued"
-                    entry["summary"] = "Audit work is queued."
+                    entry["summary"] = "Verification work is queued."
                     entry["details"] = [item for item in titles if item][:3]
                 elif active_agent == agent_id:
-                    entry["status"] = "auditing"
+                    entry["status"] = "verifying"
                     entry["summary"] = "Reviewing completed execution evidence."
             elif agent_id == self.cleanup_agent_id:
                 if cleanup_mode:
@@ -1610,12 +1653,12 @@ class HarnessScheduler:
             return
         if self.state.active_agent:
             return
-        if self.audit_agent_id and self._current_running_agent(self.audit_agent_id):
-            self.state.active_agent = self.audit_agent_id
+        if self.verification_agent_id and self._current_running_agent(self.verification_agent_id):
+            self.state.active_agent = self.verification_agent_id
             self._save_runtime()
             return
-        if self._completed_execution_queue() and self.audit_agent_id:
-            self.state.active_agent = self.audit_agent_id
+        if self._completed_execution_queue() and self.verification_agent_id:
+            self.state.active_agent = self.verification_agent_id
             self._save_runtime()
             return
         pending_brief_agent = self._next_agent_with_pending_brief()
@@ -1721,7 +1764,7 @@ class HarnessScheduler:
                 self._set_pending_execution_brief(None)
                 if pending_decision is not None:
                     self._set_pending_supervisor_decision(pending_decision)
-                    self._clear_audit_reopen_tracking()
+                    self._clear_verification_reopen_tracking()
                 self.state.extra["resume_agent"] = self.design_agent_id or self._default_work_entry_agent()
             else:
                 self._set_pending_supervisor_decision(None)
@@ -1907,7 +1950,7 @@ class HarnessScheduler:
             "maintenance_findings": self.mission.extra.get("maintenance_findings", []),
             "managed_worktrees": self._managed_worktrees(),
         }
-        if agent_id == self.communication_agent_id:
+        if agent_id == self.decision_agent_id:
             inputs["communication_brief"] = self._communication_brief()
             inputs["latest_human_reply"] = self._latest_human_reply()
         if agent_id == self.execution_agent_id:
@@ -1992,13 +2035,13 @@ class HarnessScheduler:
         lines = [coerce_str(brief.get("question")).strip()]
         source_ref = coerce_str(brief.get("source_ref")).strip()
         if source_ref:
-            lines.append(f"閺夈儲绨? {source_ref}")
+            lines.append(f"Source: {source_ref}")
         reason = coerce_str(brief.get("why_not_auto_answered")).strip()
         if reason:
-            lines.append(f"闂団偓鐟曚椒姹夊銉ュ枀缁涙牜娈戦崢鐔锋礈: {reason}")
+            lines.append(f"Why auto-answer was not safe: {reason}")
         options = brief.get("options", [])
         if isinstance(options, list) and options:
-            lines.append("閸欘垶鈧銆?")
+            lines.append("Options:")
             for option in options:
                 if isinstance(option, Mapping):
                     label = coerce_str(option.get("label") or option.get("value")).strip()
@@ -2009,17 +2052,17 @@ class HarnessScheduler:
                         lines.append(f"- {label}")
         tradeoffs = brief.get("tradeoffs", [])
         if isinstance(tradeoffs, list) and tradeoffs:
-            lines.append("閺夊啳銆€:")
+            lines.append("Tradeoffs:")
             for item in tradeoffs:
                 text = coerce_str(item).strip()
                 if text:
                     lines.append(f"- {text}")
         recommendation = coerce_str(brief.get("supervisor_recommendation")).strip()
         if recommendation:
-            lines.append(f"Supervisor 瀵ら缚顔? {recommendation}")
+            lines.append(f"Supervisor recommendation: {recommendation}")
         reply_shape = coerce_str(brief.get("required_reply_shape")).strip()
         if reply_shape:
-            lines.append(f"鐠囧嘲娲栨径? {reply_shape}")
+            lines.append(f"Required reply shape: {reply_shape}")
         return "\n".join(item for item in lines if item)
 
     def _execute_turn(self, turn: RunnerTurn) -> dict[str, Any]:
@@ -2146,7 +2189,7 @@ class HarnessScheduler:
             resume_session_id = coerce_str(execution_subagent.get("session_id")).strip()
         decision = "retry_execution" if resume_session_id else "restart_current_slice_session"
         summary = (
-            f"Retry {phase_title} after audit findings are addressed inside the assigned worktree."
+            f"Retry {phase_title} after verification findings are addressed inside the assigned worktree."
             if resume_session_id
             else f"Start a fresh execution session for {phase_title}; the previous session asked for the task again without making progress."
         )
@@ -2317,8 +2360,8 @@ class HarnessScheduler:
                 return
             if design_status in {"launched", "running"}:
                 next_agent = ""
-                if self._completed_execution_queue() and self.audit_agent_id:
-                    next_agent = self.audit_agent_id
+                if self._completed_execution_queue() and self.verification_agent_id:
+                    next_agent = self.verification_agent_id
                 self.state.active_agent = next_agent
                 self._request_scheduler_yield()
                 self._save_runtime()
@@ -2326,17 +2369,17 @@ class HarnessScheduler:
             if design_status == "completed":
                 if (
                     self._current_running_execution()
-                    or self._current_running_agent(self.audit_agent_id or "")
+                    or self._current_running_agent(self.verification_agent_id or "")
                     or self._completed_execution_queue()
                 ):
-                    self.state.active_agent = self.audit_agent_id if self._completed_execution_queue() and self.audit_agent_id else ""
+                    self.state.active_agent = self.verification_agent_id if self._completed_execution_queue() and self.verification_agent_id else ""
                     self._request_scheduler_yield()
                     self._save_runtime()
                 else:
                     self._complete_mission()
                 return
-            if self._completed_execution_queue() and self.audit_agent_id:
-                self.state.active_agent = self.audit_agent_id
+            if self._completed_execution_queue() and self.verification_agent_id:
+                self.state.active_agent = self.verification_agent_id
                 self._save_runtime()
                 return
             if self._current_running_execution():
@@ -2362,8 +2405,8 @@ class HarnessScheduler:
             if execution_status in {"launched", "running"}:
                 self._set_pending_execution_brief(None)
                 next_agent = ""
-                if self._completed_execution_queue() and self.audit_agent_id:
-                    next_agent = self.audit_agent_id
+                if self._completed_execution_queue() and self.verification_agent_id:
+                    next_agent = self.verification_agent_id
                 elif (
                     not self._planned_slice_queue()
                     and not self._prefetch_completed()
@@ -2383,22 +2426,22 @@ class HarnessScheduler:
                 self._save_runtime()
                 return
             self._set_pending_execution_brief(None)
-            self.state.active_agent = self.audit_agent_id or ""
+            self.state.active_agent = self.verification_agent_id or ""
             if not self.state.active_agent:
                 self._complete_mission()
             else:
                 self._save_runtime()
             return
 
-        if agent_id == self.audit_agent_id:
-            if coerce_str(report.get("audit_status")).strip() == "paused":
+        if agent_id == self.verification_agent_id:
+            if coerce_str(report.get("verification_status") or report.get("audit_status")).strip() == "paused":
                 resume_brief = report.get("resume_brief", {})
                 if isinstance(resume_brief, Mapping) and resume_brief:
-                    self._set_pending_agent_brief(self.audit_agent_id or "audit", resume_brief)
-                self.state.active_agent = self.audit_agent_id or ""
+                    self._set_pending_agent_brief(self.verification_agent_id or "verification", resume_brief)
+                self.state.active_agent = self.verification_agent_id or ""
                 self._save_runtime()
                 return
-            if coerce_str(report.get("audit_status")).strip() in {"launched", "running"}:
+            if coerce_str(report.get("verification_status") or report.get("audit_status")).strip() in {"launched", "running"}:
                 next_agent = ""
                 if (
                     self._current_running_execution()
@@ -2412,19 +2455,19 @@ class HarnessScheduler:
                 self._request_scheduler_yield()
                 self._save_runtime()
                 return
-            audit_status = coerce_str(report.get("audit_status") or status).strip() or status
-            if audit_status == "failed" or status == "failed":
+            verification_status = coerce_str(report.get("verification_status") or report.get("audit_status") or status).strip() or status
+            if verification_status == "failed" or status == "failed":
                 self.state.active_agent = ""
                 self.mission.status = "failed"
-                self.state.extra["failure_reason"] = "audit background worker failed"
+                self.state.extra["failure_reason"] = "verification background worker failed"
                 self._set_runtime_status("failed")
                 self._save_runtime()
                 return
             artifacts = report.get("artifacts", [])
-            audit_artifact_path = str(artifacts[-1]) if isinstance(artifacts, list) and artifacts else ""
-            if audit_artifact_path:
-                self._consume_completed_agent(self.audit_agent_id or "audit", audit_artifact_path)
-            audit_payload = self._load_json(audit_artifact_path) if audit_artifact_path else {}
+            verification_artifact_path = str(artifacts[-1]) if isinstance(artifacts, list) and artifacts else ""
+            if verification_artifact_path:
+                self._consume_completed_agent(self.verification_agent_id or "verification", verification_artifact_path)
+            audit_payload = self._load_json(verification_artifact_path) if verification_artifact_path else {}
             execution_artifact_path = ""
             if isinstance(audit_payload, Mapping):
                 execution_artifact_path = coerce_str(audit_payload.get("execution_artifact_path")).strip()
@@ -2440,14 +2483,14 @@ class HarnessScheduler:
                 if isinstance(audit_payload, Mapping) and isinstance(audit_payload.get("findings", []), list)
                 else []
             )
-            if audit_status == "accepted":
+            if verification_status == "accepted":
                 self._record_supervisor_route_outcome(
                     "accept",
                     subject=agent_id,
-                    summary=coerce_str(report.get("summary")).strip() or "Audit accepted the current round.",
-                    details={"audit_status": audit_status},
+                    summary=coerce_str(report.get("summary")).strip() or "Verification accepted the current round.",
+                    details={"verification_status": verification_status},
                 )
-                self._clear_audit_reopen_tracking()
+                self._clear_verification_reopen_tracking()
                 self._set_pending_execution_brief(None)
                 self.state.extra.pop("last_failure_findings", None)
                 self.state.extra.pop("failure_reason", None)
@@ -2467,7 +2510,7 @@ class HarnessScheduler:
                     self._schedule_cleanup(
                         "round-close",
                         resume_after=self.design_agent_id or self._default_work_entry_agent(),
-                        reason="audit accepted the current round",
+                        reason="verification accepted the current round",
                     )
                 else:
                     self.state.current_round += 1
@@ -2478,14 +2521,14 @@ class HarnessScheduler:
                     self._set_runtime_status("running")
                     self._save_runtime()
                 return
-            if audit_status == "replan_design":
+            if verification_status == "replan_design":
                 self._record_supervisor_route_outcome(
                     "replan_design",
                     subject=agent_id,
-                    summary=coerce_str(report.get("summary")).strip() or "Audit requested a new design contract before execution can continue.",
-                    details={"audit_status": audit_status},
+                    summary=coerce_str(report.get("summary")).strip() or "Verification requested a new design contract before execution can continue.",
+                    details={"verification_status": verification_status},
                 )
-                self._clear_audit_reopen_tracking()
+                self._clear_verification_reopen_tracking()
                 self._set_pending_execution_brief(None)
                 self.state.extra["last_failure_findings"] = audit_findings
                 self._release_execution_worktree(audit_design_contract)
@@ -2495,10 +2538,10 @@ class HarnessScheduler:
             self._record_supervisor_route_outcome(
                 "reopen_execution",
                 subject=agent_id,
-                summary=coerce_str(report.get("summary")).strip() or "Audit reopened the round and returned it to execution.",
-                details={"audit_status": audit_status},
+                summary=coerce_str(report.get("summary")).strip() or "Verification reopened the round and returned it to execution.",
+                details={"verification_status": verification_status},
             )
-            reopen_streak = self._record_audit_reopen(
+            reopen_streak = self._record_verification_reopen(
                 audit_findings,
                 design_contract=audit_design_contract,
             )

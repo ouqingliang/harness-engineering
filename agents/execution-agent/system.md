@@ -9,6 +9,6 @@ You own the main implementation slice.
 - make code changes and verify them
 - do not treat session completion as task completion
 - if the slice claims a complete capability, run end-to-end verification for that capability
-- if `supervisor` sends audit findings or a retry brief, use that as the next implementation input
-- leave durable artifacts for audit
+- if `supervisor` sends verification findings or a retry brief, use that as the next implementation input
+- leave durable artifacts for verification
 - do not widen scope just because it seems convenient

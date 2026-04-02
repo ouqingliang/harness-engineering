@@ -8,7 +8,7 @@
 
 `design-agent` exists to turn the current round goal into a concrete slice that another agent can execute.
 
-Its job is to define what is in scope, what is out of scope, what must be true for acceptance, and what boundary conditions matter. It does not run the schedule for the whole mission.
+Its job is to define what is in scope, what is out of scope, what must be true for acceptance, and what boundary conditions matter. It does not run the schedule for the whole mission, and it does not absorb decision or verification work.
 
 ## Owned Truths
 
@@ -32,7 +32,7 @@ It is authoritative for "what exactly are we asking the next worker to do" and "
 - implementation details
 - verification verdicts
 
-It may propose a path, but it does not become the supervisor or the verifier.
+It may propose a path, but it does not become the supervisor, the decision agent, or the verifier.
 
 ## Inputs
 

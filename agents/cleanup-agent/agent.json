@@ -1,16 +1,16 @@
 {
   "id": "cleanup",
   "name": "Cleanup Agent",
-  "description": "Owns drift control, memory compression, and stale artifact cleanup.",
+  "description": "Owns drift control, recovery support, and stale artifact cleanup.",
   "enabled": true,
   "order": 50,
   "task": {
     "id": "cleanup",
     "title": "Compress state and remove drift",
-    "goal": "After audit completes, compress transient execution state into durable memory, remove stale artifacts and temporary debris, and leave the workspace easier for the next run to resume.",
+    "goal": "After verification completes or a recovery or maintenance pass is requested, compress transient execution state into durable memory, remove stale artifacts and temporary debris, and leave the workspace easier for the next run to resume.",
     "system_prompt_path": "system.md"
   },
   "dependencies": [
-    "audit"
+    "verification"
   ]
 }

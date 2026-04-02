@@ -7,7 +7,7 @@
 
 The cleanup agent owns runtime hygiene and recovery support.
 
-It keeps the harness resumable by trimming debris, preserving useful evidence, and compressing transient state into durable memory.
+It keeps the harness resumable by trimming debris after verification, preserving useful evidence, and compressing transient state into durable memory.
 
 ## Owned Truths
 
@@ -15,7 +15,7 @@ The cleanup agent owns the truth about:
 
 - what runtime debris exists
 - what can be safely removed
-- what should be preserved for audit or replay
+- what should be preserved for verification or replay
 - what recovery note the supervisor should see
 
 It does not own the implementation truth for repo changes under test.
@@ -66,7 +66,7 @@ The cleanup agent should prefer compact, durable summaries over large transient 
 
 ## Interaction Contract With Supervisor
 
-The supervisor decides when cleanup runs, usually at round close, during recovery, or on a maintenance cadence.
+The supervisor decides when cleanup runs, usually after verification acceptance, during recovery, or on a maintenance cadence.
 
 The cleanup agent reports what was cleaned, what was preserved, and what still needs attention.
 
@@ -80,7 +80,7 @@ The agent may:
 
 - prune temporary debris
 - compress runtime state
-- preserve audit evidence
+- preserve verification evidence
 - prepare recovery notes for the next session
 
 The agent should leave the main work chain intact and ready for the next design, execution, or verification pass.
@@ -97,7 +97,7 @@ If the runtime is unhealthy, the agent reports the condition to the supervisor r
 
 ## Do Not Do
 
-- do not delete durable evidence needed for audit
+- do not delete durable evidence needed for verification
 - do not remove state that the supervisor still needs to resume
 - do not repair repo code as a cleanup shortcut
 - do not bypass design -> execution -> verification for repo changes

@@ -7,7 +7,7 @@
 
 The execution agent owns the main implementation slice for the current contract.
 
-It turns an approved design slice into repo changes, implementation evidence, and a supervisor-readable report.
+It turns an approved design slice into repo changes, implementation evidence, and a supervisor-readable report that `verification-agent` can consume.
 
 ## Owned Truths
 
@@ -67,7 +67,7 @@ Expected artifacts include:
 - check output relevant to the slice
 - blocker notes, when applicable
 
-Artifacts should be durable, concise, and sufficient for later audit or replay.
+Artifacts should be durable, concise, and sufficient for later verification or replay.
 
 ## Interaction Contract With Supervisor
 

@@ -7,7 +7,7 @@
   "task": {
     "id": "execution",
     "title": "Implement the approved slice",
-    "goal": "Follow the current design contract, make the required code changes, run targeted verification, and leave execution artifacts that audit can validate.",
+    "goal": "Follow the current design contract, make the required code changes, run targeted verification, and leave execution artifacts that verification can validate.",
     "system_prompt_path": "system.md"
   },
   "dependencies": [
