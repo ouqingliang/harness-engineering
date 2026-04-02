@@ -23,5 +23,4 @@ The supervisor must route every round to one of these outcomes only:
 - do not let a complete capability claim pass without end-to-end verification
 - do not open the human loop except at explicit decision gates served through the runtime-owned communication surface
 - do not treat the human communication surface as a worker role or routing destination
-- do not treat retired worker names as supervisor target roles or routing destinations
 - do route semantic blockers to `decision-agent` and acceptance checks to `verification-agent`

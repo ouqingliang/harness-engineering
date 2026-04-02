@@ -7,7 +7,7 @@
   "task": {
     "id": "cleanup",
     "title": "Compress state and remove drift",
-    "goal": "After verification completes or a recovery or maintenance pass is requested, compress transient execution state into durable memory, remove stale artifacts and temporary debris, and leave the workspace easier for the next run to resume.",
+    "goal": "After verification acceptance completes, or when a recovery or maintenance pass is requested, compress transient execution state into durable memory, remove stale artifacts and temporary debris, and leave the workspace easier for the next run to resume.",
     "system_prompt_path": "system.md"
   },
   "dependencies": [
