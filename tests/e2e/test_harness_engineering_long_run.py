@@ -76,10 +76,7 @@ def _fake_codex_env(temp_path: Path, *, sleep_seconds: float = 0.0) -> dict[str,
 class HarnessEngineeringCliTests(unittest.TestCase):
     def test_cli_run_serves_health_endpoint_while_execution_is_busy(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
-        scratch_root = repo_root / ".tmp-tests"
-        scratch_root.mkdir(parents=True, exist_ok=True)
-        temp_path = scratch_root / f"busy-health-{uuid.uuid4().hex[:8]}"
-        temp_path.mkdir(parents=True, exist_ok=True)
+        temp_path = Path(tempfile.mkdtemp(prefix=f"busy-health-{uuid.uuid4().hex[:8]}-"))
         try:
             doc_root = temp_path / "docs"
             memory_root = temp_path / "memory"

@@ -2331,9 +2331,11 @@ class HarnessScheduler:
         self._save_runtime()
 
     def _advance_after_report(self, agent_id: str, result: Mapping[str, Any]) -> None:
+        original_agent_id = coerce_str(agent_id).strip()
+        agent_id = self._normalize_role_agent_id(original_agent_id)
         report = dict(result["report"])
         self._record_result(agent_id, result)
-        self._record_supervisor_event_from_report(agent_id, report)
+        self._record_supervisor_event_from_report(original_agent_id or agent_id, report)
         status = coerce_str(report.get("status"), "completed").strip()
         self.mission.status = "active"
         self._set_runtime_status("running")
@@ -2486,7 +2488,7 @@ class HarnessScheduler:
             if verification_status == "accepted":
                 self._record_supervisor_route_outcome(
                     "accept",
-                    subject=agent_id,
+                    subject=original_agent_id or agent_id,
                     summary=coerce_str(report.get("summary")).strip() or "Verification accepted the current round.",
                     details={"verification_status": verification_status},
                 )
@@ -2524,7 +2526,7 @@ class HarnessScheduler:
             if verification_status == "replan_design":
                 self._record_supervisor_route_outcome(
                     "replan_design",
-                    subject=agent_id,
+                    subject=original_agent_id or agent_id,
                     summary=coerce_str(report.get("summary")).strip() or "Verification requested a new design contract before execution can continue.",
                     details={"verification_status": verification_status},
                 )
@@ -2537,7 +2539,7 @@ class HarnessScheduler:
                 return
             self._record_supervisor_route_outcome(
                 "reopen_execution",
-                subject=agent_id,
+                subject=original_agent_id or agent_id,
                 summary=coerce_str(report.get("summary")).strip() or "Verification reopened the round and returned it to execution.",
                 details={"verification_status": verification_status},
             )

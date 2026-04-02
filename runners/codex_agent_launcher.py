@@ -44,7 +44,7 @@ def _heartbeat_loop(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a saved background agent request for the harness.")
-    parser.add_argument("--agent-id", required=True, choices=("design", "execution", "audit"))
+    parser.add_argument("--agent-id", required=True, choices=("design", "execution", "verification", "audit"))
     parser.add_argument("--request-path", required=True)
     parser.add_argument("--result-path", required=True)
     parser.add_argument("--launcher-state-path", required=True)
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.agent_id == "design":
             run_saved_design_request(**common_kwargs)
             return 0
-        if args.agent_id == "audit":
+        if args.agent_id in {"verification", "audit"}:
             run_saved_audit_request(**common_kwargs)
             return 0
         _run_execution_subagent_from_saved_request(**common_kwargs)
