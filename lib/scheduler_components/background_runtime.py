@@ -7,7 +7,7 @@ import subprocess
 import sys
 from typing import Any, Mapping
 
-from ..runtime_state import coerce_int, coerce_str, utc_now
+from ..runtime_state import coerce_int, coerce_str, read_json_file, utc_now
 from .support import HARNESS_ROOT, _git_status_snapshot, _write_json
 
 PID_MISMATCH_FAILURE_GRACE_SECONDS = 120
@@ -18,9 +18,7 @@ def _read_launcher_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        import json
-
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_file(path)
     except Exception:
         return {}
     return dict(payload) if isinstance(payload, Mapping) else {}
@@ -242,9 +240,7 @@ def load_launcher_status(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        import json
-
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_file(path)
     except Exception:
         return {}
     if not isinstance(payload, Mapping):

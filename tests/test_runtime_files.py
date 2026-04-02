@@ -15,15 +15,30 @@ from lib.runtime_state import (
     HarnessConfig,
     Mission,
     RuntimeState,
+    append_event_row,
+    brief_record_path,
     ensure_runtime_layout,
     ensure_runtime_root,
+    event_log_path,
+    gate_record_path,
+    inbox_message_path,
     load_mission,
+    load_jsonl_rows,
     load_or_build_mission,
     load_or_init_state,
     load_state,
+    read_brief_record,
+    read_gate_record,
+    read_inbox_message,
+    read_session_metadata,
     save_mission,
     save_state,
+    session_metadata_path,
     utc_now,
+    write_brief_record,
+    write_gate_record,
+    write_inbox_message,
+    write_session_metadata,
 )
 from lib.scheduler_components.background_runtime import (
     HARNESS_ROOT,
@@ -36,6 +51,7 @@ from lib.scheduler_components.execution import DEFAULT_EXECUTION_OUTPUT, _run_ex
 
 
 class RuntimeFileTests(unittest.TestCase):
+    @unittest.skip("legacy runtime path expectations replaced by WS-01 Task 1 frozen substrate tests")
     def test_layout_and_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             memory_root = Path(temp_dir) / "memory"
@@ -119,6 +135,116 @@ class RuntimeFileTests(unittest.TestCase):
             self.assertEqual(handoff_path(memory_root, "design-to-execution").name, "design-to-execution.json")
             self.assertEqual(report_path(memory_root, "execution").name, "execution.json")
             self.assertEqual(answer_path(memory_root, "q-001").name, "q-001.json")
+
+    def test_runtime_layout_round_trips_mission_and_state_with_utf8(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir) / "memory"
+            paths = ensure_runtime_root(memory_root)
+            self.assertTrue(paths.harness_root.exists())
+            self.assertTrue(paths.events_dir.exists())
+            self.assertTrue(paths.sessions_dir.exists())
+            self.assertTrue(paths.inbox_dir.exists())
+            self.assertTrue(paths.artifacts_dir.exists())
+            self.assertTrue(paths.gates_dir.exists())
+            self.assertTrue(paths.briefs_dir.exists())
+            self.assertTrue(paths.worktrees_dir.exists())
+            for removed_name in ("handoffs", "reports", "questions", "answers", "locks", "launchers"):
+                self.assertFalse((paths.harness_root / removed_name).exists())
+
+            mission = Mission(
+                doc_root="C:/docs/项目主目录",
+                goal="一键运行 harness engineering",
+                status="active",
+                round=3,
+                extra={"note": "中文内容"},
+            )
+            state = RuntimeState(
+                active_agent="execution-agent",
+                last_successful_agent="design-agent",
+                retry_count=2,
+                last_run_at="2026-03-25T12:34:56Z",
+                current_round=3,
+                extra={"comment": "稳定"},
+            )
+            save_mission(memory_root, mission)
+            save_state(memory_root, state)
+
+            fresh_root = Path(temp_dir) / "fresh-memory"
+            self.assertEqual(load_or_build_mission(fresh_root, "C:/docs/项目主目录").doc_root, "C:/docs/项目主目录")
+            self.assertEqual(load_or_init_state(fresh_root).current_round, 0)
+
+            config = HarnessConfig.from_mapping(
+                {
+                    "memory_root": "runtime-memory",
+                    "doc_root": "C:/docs/项目主目录",
+                    "goal": "一键运行 harness engineering",
+                    "sleep_seconds": "2.5",
+                    "decision_gate_tags": ["architecture_change", "goal_conflict"],
+                    "default_launcher": "codex_app_server",
+                    "note": "中文",
+                }
+            )
+            self.assertEqual(config.sleep_seconds, 2.5)
+            self.assertEqual(config.decision_gate_tags, ("architecture_change", "goal_conflict"))
+            self.assertEqual(config.extra["note"], "中文")
+
+            loaded_mission = load_mission(memory_root)
+            loaded_state = load_state(memory_root)
+            self.assertEqual(loaded_mission.goal, mission.goal)
+            self.assertEqual(loaded_mission.extra["note"], "中文内容")
+            self.assertEqual(loaded_state.active_agent, state.active_agent)
+            self.assertEqual(loaded_state.extra["comment"], "稳定")
+
+    def test_utf8_runtime_substrate_helpers_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir) / "memory"
+            paths = ensure_runtime_layout(memory_root)
+
+            session_path = session_metadata_path(memory_root, "session-001")
+            session_payload = {
+                "session_id": "session-001",
+                "agent": "execution-agent",
+                "summary": "继续处理 UTF-8 会话",
+            }
+            write_session_metadata(session_path, session_payload)
+            self.assertEqual(read_session_metadata(session_path), session_payload)
+            self.assertIn("继续处理 UTF-8 会话", session_path.read_text(encoding="utf-8"))
+
+            inbox_path = inbox_message_path(memory_root, "message-001")
+            inbox_payload = {
+                "message_id": "message-001",
+                "sender": "supervisor",
+                "body": "请继续处理下一步。",
+            }
+            write_inbox_message(inbox_path, inbox_payload)
+            self.assertEqual(read_inbox_message(inbox_path), inbox_payload)
+            self.assertIn("请继续处理下一步。", inbox_path.read_text(encoding="utf-8"))
+
+            gate_path = gate_record_path(memory_root, "gate-001")
+            gate_payload = {"gate_id": "gate-001", "status": "open", "title": "需要人工确认"}
+            write_gate_record(gate_path, gate_payload)
+            self.assertEqual(read_gate_record(gate_path), gate_payload)
+
+            brief_path = brief_record_path(memory_root, "brief-001")
+            brief_payload = {"brief_id": "brief-001", "agent": "design-agent", "summary": "交付新的简报内容"}
+            write_brief_record(brief_path, brief_payload)
+            self.assertEqual(read_brief_record(brief_path), brief_payload)
+
+            event_path = event_log_path(memory_root, "session-001")
+            event_rows = [
+                {"event": "session.started", "summary": "会话已启动"},
+                {"event": "session.updated", "summary": "继续处理第二步"},
+            ]
+            for row in event_rows:
+                append_event_row(event_path, row)
+            self.assertEqual(load_jsonl_rows(event_path), event_rows)
+            self.assertIn("会话已启动", event_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(session_path.parent, paths.sessions_dir)
+            self.assertEqual(inbox_path.parent, paths.inbox_dir)
+            self.assertEqual(gate_path.parent, paths.gates_dir)
+            self.assertEqual(brief_path.parent, paths.briefs_dir)
+            self.assertEqual(event_path.parent, paths.events_dir)
 
     def test_dead_running_launcher_is_marked_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

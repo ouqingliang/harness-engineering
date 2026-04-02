@@ -12,13 +12,12 @@ import uuid
 HARNESS_DIR_NAME = ".harness"
 MISSION_FILE_NAME = "mission.json"
 STATE_FILE_NAME = "state.json"
-HANDOFFS_DIR_NAME = "handoffs"
-REPORTS_DIR_NAME = "reports"
-QUESTIONS_DIR_NAME = "questions"
-ANSWERS_DIR_NAME = "answers"
+EVENTS_DIR_NAME = "events"
+SESSIONS_DIR_NAME = "sessions"
+INBOX_DIR_NAME = "inbox"
 ARTIFACTS_DIR_NAME = "artifacts"
-LOCKS_DIR_NAME = "locks"
-LAUNCHERS_DIR_NAME = "launchers"
+GATES_DIR_NAME = "gates"
+BRIEFS_DIR_NAME = "briefs"
 WORKTREES_DIR_NAME = "worktrees"
 DEFAULT_DECISION_GATE_TAGS = (
     "architecture_change",
@@ -36,13 +35,12 @@ class RuntimePaths:
     harness_root: Path
     mission_file: Path
     state_file: Path
-    handoffs_dir: Path
-    reports_dir: Path
-    questions_dir: Path
-    answers_dir: Path
+    events_dir: Path
+    sessions_dir: Path
+    inbox_dir: Path
     artifacts_dir: Path
-    locks_dir: Path
-    launchers_dir: Path
+    gates_dir: Path
+    briefs_dir: Path
     worktrees_dir: Path
 
 
@@ -254,13 +252,12 @@ def runtime_paths(memory_root: Path | str) -> RuntimePaths:
         harness_root=harness_root,
         mission_file=harness_root / MISSION_FILE_NAME,
         state_file=harness_root / STATE_FILE_NAME,
-        handoffs_dir=harness_root / HANDOFFS_DIR_NAME,
-        reports_dir=harness_root / REPORTS_DIR_NAME,
-        questions_dir=harness_root / QUESTIONS_DIR_NAME,
-        answers_dir=harness_root / ANSWERS_DIR_NAME,
+        events_dir=harness_root / EVENTS_DIR_NAME,
+        sessions_dir=harness_root / SESSIONS_DIR_NAME,
+        inbox_dir=harness_root / INBOX_DIR_NAME,
         artifacts_dir=harness_root / ARTIFACTS_DIR_NAME,
-        locks_dir=harness_root / LOCKS_DIR_NAME,
-        launchers_dir=harness_root / LAUNCHERS_DIR_NAME,
+        gates_dir=harness_root / GATES_DIR_NAME,
+        briefs_dir=harness_root / BRIEFS_DIR_NAME,
         worktrees_dir=harness_root / WORKTREES_DIR_NAME,
     )
 
@@ -268,19 +265,94 @@ def runtime_paths(memory_root: Path | str) -> RuntimePaths:
 def ensure_runtime_layout(memory_root: Path | str) -> RuntimePaths:
     paths = runtime_paths(memory_root)
     paths.harness_root.mkdir(parents=True, exist_ok=True)
-    paths.handoffs_dir.mkdir(parents=True, exist_ok=True)
-    paths.reports_dir.mkdir(parents=True, exist_ok=True)
-    paths.questions_dir.mkdir(parents=True, exist_ok=True)
-    paths.answers_dir.mkdir(parents=True, exist_ok=True)
+    paths.events_dir.mkdir(parents=True, exist_ok=True)
+    paths.sessions_dir.mkdir(parents=True, exist_ok=True)
+    paths.inbox_dir.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
-    paths.locks_dir.mkdir(parents=True, exist_ok=True)
-    paths.launchers_dir.mkdir(parents=True, exist_ok=True)
+    paths.gates_dir.mkdir(parents=True, exist_ok=True)
+    paths.briefs_dir.mkdir(parents=True, exist_ok=True)
     paths.worktrees_dir.mkdir(parents=True, exist_ok=True)
     return paths
 
 
 def ensure_runtime_root(memory_root: Path | str) -> RuntimePaths:
     return ensure_runtime_layout(memory_root)
+
+
+def session_metadata_path(memory_root: Path | str, session_id: str) -> Path:
+    return runtime_paths(memory_root).sessions_dir / f"{session_id}.json"
+
+
+def inbox_message_path(memory_root: Path | str, message_id: str) -> Path:
+    return runtime_paths(memory_root).inbox_dir / f"{message_id}.json"
+
+
+def gate_record_path(memory_root: Path | str, gate_id: str) -> Path:
+    return runtime_paths(memory_root).gates_dir / f"{gate_id}.json"
+
+
+def brief_record_path(memory_root: Path | str, brief_id: str) -> Path:
+    return runtime_paths(memory_root).briefs_dir / f"{brief_id}.json"
+
+
+def event_log_path(memory_root: Path | str, stream_id: str) -> Path:
+    return runtime_paths(memory_root).events_dir / f"{stream_id}.jsonl"
+
+
+def read_session_metadata(path: Path) -> dict[str, Any]:
+    return read_json_file(path)
+
+
+def read_inbox_message(path: Path) -> dict[str, Any]:
+    return read_json_file(path)
+
+
+def read_gate_record(path: Path) -> dict[str, Any]:
+    return read_json_file(path)
+
+
+def read_brief_record(path: Path) -> dict[str, Any]:
+    return read_json_file(path)
+
+
+def write_session_metadata(path: Path, payload: Mapping[str, Any]) -> Path:
+    write_json_file(path, payload)
+    return path
+
+
+def write_inbox_message(path: Path, payload: Mapping[str, Any]) -> Path:
+    write_json_file(path, payload)
+    return path
+
+
+def write_gate_record(path: Path, payload: Mapping[str, Any]) -> Path:
+    write_json_file(path, payload)
+    return path
+
+
+def write_brief_record(path: Path, payload: Mapping[str, Any]) -> Path:
+    write_json_file(path, payload)
+    return path
+
+
+def append_event_row(path: Path, payload: Mapping[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True) + "\n")
+    return path
+
+
+def load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, Mapping):
+            rows.append(dict(payload))
+    return rows
 
 
 def default_mission(
