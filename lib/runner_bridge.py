@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from lib.communication_api import CommunicationStore, coerce_gate_payload, pending_gates
+from lib.runtime_contract import (
+    SESSION_CONTROL_FIELD,
+    TASK_NOTIFICATION_FIELD,
+    coerce_session_control,
+    coerce_task_notification,
+)
 
 
 def _utc_now() -> str:
@@ -98,6 +104,13 @@ def _normalize_runtime_paths(runtime_paths: Mapping[str, Any] | None, runtime_ro
     }
 
 
+def _extract_session_control(payload: Mapping[str, Any]) -> dict[str, str] | None:
+    candidate = payload.get(SESSION_CONTROL_FIELD, payload.get("session_control"))
+    if candidate is None:
+        return None
+    return coerce_session_control(candidate)
+
+
 def _default_state() -> dict[str, Any]:
     return {
         "version": 1,
@@ -178,6 +191,13 @@ def _normalize_report(raw_report: Mapping[str, Any] | None, turn: RunnerTurn, *,
     report.setdefault("artifacts", [])
     report.setdefault("next_hint", "cycle complete")
     report["artifacts"] = [str(item) for item in report.get("artifacts", [])]
+    task_notification = report.get(TASK_NOTIFICATION_FIELD, report.get("task_notification"))
+    if task_notification is not None:
+        report[TASK_NOTIFICATION_FIELD] = coerce_task_notification(
+            task_notification if isinstance(task_notification, Mapping) else None,
+            default_summary=report.get("summary", ""),
+        )
+        report.pop("task_notification", None)
     report["completed_at"] = _utc_now()
     return report
 
@@ -192,7 +212,7 @@ def _build_handoff(agent_spec: Mapping[str, Any], handoff: Mapping[str, Any] | N
     inputs.setdefault("mission", _json_copy(mission))
     inputs.setdefault("state", _json_copy(state))
     inputs.setdefault("previous_agent", state.get("last_agent"))
-    return {
+    payload = {
         "id": handoff_payload.get("id") or _new_id("handoff"),
         "cycle_id": cycle_id,
         "sequence": sequence,
@@ -206,6 +226,10 @@ def _build_handoff(agent_spec: Mapping[str, Any], handoff: Mapping[str, Any] | N
         "state": _json_copy(state),
         "runtime_paths": {key: str(value) for key, value in runtime_paths.items()},
     }
+    session_control = _extract_session_control(handoff_payload)
+    if session_control is not None:
+        payload[SESSION_CONTROL_FIELD] = session_control
+    return payload
 
 
 def _write_turn_state(state_file: Path, payload: Mapping[str, Any]) -> None:

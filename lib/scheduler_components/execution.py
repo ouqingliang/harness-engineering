@@ -8,6 +8,14 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
+from ..runtime_contract import (
+    CONTROL_ACTION_CONTINUE,
+    CONTROL_ACTION_SPAWN,
+    SESSION_CONTROL_FIELD,
+    TASK_NOTIFICATION_FIELD,
+    build_task_notification,
+    coerce_session_control,
+)
 from ..runtime_state import coerce_str, utc_now
 from .background_runtime import _process_identity_token, launch_background_agent, save_launcher_state
 from .support import (
@@ -274,6 +282,17 @@ def _prepare_execution_request(
         human_decisions=human_decisions,
         supervisor_brief=supervisor_brief,
     )
+    resume_session_id = (
+        coerce_str(supervisor_brief.get("resume_session_id")).strip()
+        if isinstance(supervisor_brief, Mapping)
+        else ""
+    )
+    session_control = coerce_session_control(
+        {
+            "action": CONTROL_ACTION_CONTINUE if resume_session_id else CONTROL_ACTION_SPAWN,
+            "session": resume_session_id,
+        }
+    )
     request_payload = {
         "workspace_root": str(workspace_root),
         "canonical_project_root": str(canonical_project_root),
@@ -281,11 +300,8 @@ def _prepare_execution_request(
         "planning_doc": planning_doc,
         "design_contract": dict(design_contract),
         "supervisor_brief": dict(supervisor_brief) if isinstance(supervisor_brief, Mapping) else {},
-        "resume_session_id": (
-            coerce_str(supervisor_brief.get("resume_session_id")).strip()
-            if isinstance(supervisor_brief, Mapping)
-            else ""
-        ),
+        SESSION_CONTROL_FIELD: session_control,
+        "resume_session_id": resume_session_id,
         "execution_artifact_path": (
             coerce_str(supervisor_brief.get("execution_artifact_path")).strip()
             if isinstance(supervisor_brief, Mapping)
@@ -313,6 +329,18 @@ def _run_execution_subagent_from_saved_request(
     prompt = coerce_str(request_payload.get("prompt")).strip()
     codex_executable = coerce_str(request_payload.get("codex_executable")).strip()
     resume_session_id = coerce_str(request_payload.get("resume_session_id")).strip()
+    request_session_control = coerce_session_control(
+        request_payload.get(SESSION_CONTROL_FIELD)
+        if request_payload.get(SESSION_CONTROL_FIELD) is not None
+        else {
+            "action": CONTROL_ACTION_CONTINUE if resume_session_id else CONTROL_ACTION_SPAWN,
+            "session": resume_session_id,
+        }
+    )
+    if request_session_control.get("action") == CONTROL_ACTION_CONTINUE:
+        resume_session_id = coerce_str(request_session_control.get("session")).strip() or resume_session_id
+    else:
+        resume_session_id = ""
     started_at = coerce_str(request_payload.get("recorded_at")).strip() or utc_now()
     schema_path = Path(coerce_str(request_payload.get("schema_path")).strip())
     output_path = Path(coerce_str(request_payload.get("output_path")).strip())
@@ -348,6 +376,13 @@ def _run_execution_subagent_from_saved_request(
             "post_git_status": _git_status_snapshot(workspace_root),
             "command": [],
             "session_id": resume_session_id,
+            TASK_NOTIFICATION_FIELD: build_task_notification(
+                session=resume_session_id,
+                status="terminal",
+                summary="codex executable was not found on PATH",
+                result=dict(DEFAULT_EXECUTION_OUTPUT),
+                output_file=output_path,
+            ),
         }
         _write_json(result_path, payload)
         save_launcher_state(
@@ -367,7 +402,7 @@ def _run_execution_subagent_from_saved_request(
         return payload
 
     pre_git_status = _git_status_snapshot(workspace_root)
-    if resume_session_id:
+    if request_session_control.get("action") == CONTROL_ACTION_CONTINUE and resume_session_id:
         command = [
             codex_executable,
             "exec",
@@ -429,6 +464,13 @@ def _run_execution_subagent_from_saved_request(
         )
         else "terminal"
     )
+    task_notification = build_task_notification(
+        session=session_id,
+        status=session_state,
+        summary=coerce_str(parsed_output.get("summary")).strip() or f"Execution session reported {session_state}.",
+        result=parsed_output,
+        output_file=output_path,
+    )
     payload = {
         "ok": completed.returncode == 0,
         "command": command,
@@ -443,6 +485,7 @@ def _run_execution_subagent_from_saved_request(
         "post_git_status": post_git_status,
         "session_id": session_id,
         "session_state": session_state,
+        TASK_NOTIFICATION_FIELD: task_notification,
     }
     _write_json(result_path, payload)
     _write_json(launcher_run_path, payload)
