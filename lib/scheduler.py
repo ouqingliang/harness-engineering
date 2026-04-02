@@ -1604,7 +1604,7 @@ class HarnessScheduler:
     def _pending_gate_answer(self, gate_id: str) -> dict[str, Any] | None:
         if not gate_id:
             return None
-        for path in sorted(self.paths.answers_dir.glob("*.json")):
+        for path in sorted(self.paths.inbox_dir.glob("*.json")):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("question_id") == gate_id or payload.get("gate_id") == gate_id:
                 payload.setdefault("id", path.stem)

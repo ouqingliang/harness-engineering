@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
@@ -100,7 +99,7 @@ class CommunicationStore:
     def __init__(self, runtime_root: Path) -> None:
         self.runtime_root = Path(runtime_root)
         self.state_file = (
-            self.runtime_root / "launchers" / "communication" / "state.json"
+            self.runtime_root / "inbox" / "communication" / "state.json"
         )
         self._lock = threading.RLock()
         self.ensure()
@@ -306,12 +305,11 @@ def write_human_reply(
     source: str = "human",
 ) -> dict[str, Any]:
     runtime_root = Path(runtime_root)
-    answers_dir = runtime_root / "answers"
-    answers_dir.mkdir(parents=True, exist_ok=True)
     answer_id = _new_id("answer")
-    answer_path = answers_dir / f"{answer_id}.json"
+    answer_path = runtime_root / "inbox" / f"{answer_id}.json"
     record = {
         "id": answer_id,
+        "message_id": answer_id,
         "question_id": gate_id,
         "gate_id": gate_id,
         "answer": body,

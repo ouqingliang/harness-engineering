@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from .runtime_state import (
     coerce_str,
+    brief_record_path,
     ensure_runtime_layout,
     read_json_file,
     runtime_paths,
@@ -50,7 +51,7 @@ class Handoff:
 
 
 def handoffs_dir(memory_root: Path | str) -> Path:
-    return runtime_paths(memory_root).handoffs_dir
+    return runtime_paths(memory_root).briefs_dir
 
 
 def handoff_path(memory_root: Path | str, name: str) -> Path:
@@ -67,7 +68,7 @@ def write_handoff(path: Path, handoff: Handoff) -> Path:
 
 
 def save_handoff(memory_root: Path | str, name: str, handoff: Handoff) -> Path:
-    paths = ensure_runtime_layout(memory_root)
-    path = paths.handoffs_dir / f"{name}.json"
+    ensure_runtime_layout(memory_root)
+    path = brief_record_path(memory_root, name)
     write_json_file(path, handoff.to_mapping())
     return path

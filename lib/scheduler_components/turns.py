@@ -244,7 +244,7 @@ def _execute_design_turn(
         phase_title="design",
     )
     design_workspace_root = Path(coerce_str(worktree_entry.get("path")).strip()).resolve()
-    launcher_dir = scheduler.paths.launchers_dir / "design"
+    launcher_dir = scheduler.paths.artifacts_dir / "launchers" / "design"
     if existing_run is None:
         request_artifact_path = scheduler._artifact_path(turn, "design-request")
         result_artifact_path = scheduler._artifact_path(turn, "design-result")
@@ -478,7 +478,7 @@ def _execute_execution_turn(
         current_run = scheduler._current_running_execution()
         if current_run is not None and slice_key and coerce_str(current_run.get("slice_key")).strip() != slice_key:
             active_run = current_run
-    launcher_dir = scheduler.paths.launchers_dir / "codex_exec"
+    launcher_dir = scheduler.paths.artifacts_dir / "launchers" / "codex_exec"
     if active_run is not None:
         request_artifact_path = Path(coerce_str(active_run.get("request_path")).strip())
         result_artifact_path = Path(coerce_str(active_run.get("result_path")).strip())
@@ -866,7 +866,7 @@ def _execute_audit_turn(
         phase_title=phase_title,
     )
     audit_workspace_root = Path(coerce_str(worktree_entry.get("path")).strip()).resolve()
-    launcher_dir = scheduler.paths.launchers_dir / "audit"
+    launcher_dir = scheduler.paths.artifacts_dir / "launchers" / "audit"
     if existing_run is None:
         request_artifact_path = scheduler._artifact_path(turn, "audit-request")
         result_artifact_path = scheduler._artifact_path(turn, "audit-result")

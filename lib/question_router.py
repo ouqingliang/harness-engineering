@@ -7,6 +7,8 @@ from typing import Any, Mapping
 from .runtime_state import (
     coerce_bool,
     coerce_str,
+    gate_record_path,
+    inbox_message_path,
     ensure_runtime_layout,
     read_json_file,
     runtime_paths,
@@ -178,11 +180,11 @@ def route_question(question: Question) -> RouteDecision:
 
 
 def questions_dir(memory_root: Path | str) -> Path:
-    return runtime_paths(memory_root).questions_dir
+    return runtime_paths(memory_root).gates_dir
 
 
 def answers_dir(memory_root: Path | str) -> Path:
-    return runtime_paths(memory_root).answers_dir
+    return runtime_paths(memory_root).inbox_dir
 
 
 def question_path(memory_root: Path | str, name: str) -> Path:
@@ -212,14 +214,14 @@ def write_answer(path: Path, answer: Answer) -> Path:
 
 
 def save_question(memory_root: Path | str, name: str, question: Question) -> Path:
-    paths = ensure_runtime_layout(memory_root)
-    path = paths.questions_dir / f"{name}.json"
+    ensure_runtime_layout(memory_root)
+    path = gate_record_path(memory_root, name)
     write_json_file(path, question.to_mapping())
     return path
 
 
 def save_answer(memory_root: Path | str, question_id: str, answer: Answer) -> Path:
-    paths = ensure_runtime_layout(memory_root)
-    path = paths.answers_dir / f"{question_id}.json"
+    ensure_runtime_layout(memory_root)
+    path = inbox_message_path(memory_root, question_id)
     write_json_file(path, answer.to_mapping())
     return path

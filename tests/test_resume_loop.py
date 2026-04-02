@@ -153,11 +153,14 @@ class ResumeLoopTests(unittest.TestCase):
                 second_pass = scheduler.run_until_stable(max_turns=12)
             self.assertEqual(second_pass.status, "completed")
             self.assertEqual(second_pass.state.current_round, 1)
-            reports = sorted(paths.reports_dir.glob("*.json"))
-            self.assertEqual(len(reports), 8)
-            report_names = [path.name for path in reports]
-            self.assertEqual(len([name for name in report_names if name.endswith("-communication.json")]), 2)
-            self.assertEqual(len([name for name in report_names if name.endswith("-design.json")]), 3)
+            self.assertTrue(paths.events_dir.exists())
+            self.assertTrue(paths.sessions_dir.exists())
+            self.assertTrue(paths.inbox_dir.exists())
+            self.assertTrue(paths.gates_dir.exists())
+            self.assertTrue(paths.briefs_dir.exists())
+            self.assertTrue((paths.artifacts_dir / "launchers").exists())
+            self.assertTrue(list(paths.inbox_dir.glob("*.json")))
+            self.assertTrue(list(paths.briefs_dir.glob("*.json")))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from .runtime_state import (
     coerce_str,
+    brief_record_path,
     ensure_runtime_layout,
     read_json_file,
     runtime_paths,
@@ -50,7 +51,7 @@ class Report:
 
 
 def reports_dir(memory_root: Path | str) -> Path:
-    return runtime_paths(memory_root).reports_dir
+    return runtime_paths(memory_root).briefs_dir
 
 
 def report_path(memory_root: Path | str, name: str) -> Path:
@@ -67,7 +68,7 @@ def write_report(path: Path, report: Report) -> Path:
 
 
 def save_report(memory_root: Path | str, name: str, report: Report) -> Path:
-    paths = ensure_runtime_layout(memory_root)
-    path = paths.reports_dir / f"{name}.json"
+    ensure_runtime_layout(memory_root)
+    path = brief_record_path(memory_root, name)
     write_json_file(path, report.to_mapping())
     return path

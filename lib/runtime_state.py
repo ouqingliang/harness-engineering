@@ -269,6 +269,7 @@ def ensure_runtime_layout(memory_root: Path | str) -> RuntimePaths:
     paths.sessions_dir.mkdir(parents=True, exist_ok=True)
     paths.inbox_dir.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    launcher_records_dir(memory_root).mkdir(parents=True, exist_ok=True)
     paths.gates_dir.mkdir(parents=True, exist_ok=True)
     paths.briefs_dir.mkdir(parents=True, exist_ok=True)
     paths.worktrees_dir.mkdir(parents=True, exist_ok=True)
@@ -297,6 +298,10 @@ def brief_record_path(memory_root: Path | str, brief_id: str) -> Path:
 
 def event_log_path(memory_root: Path | str, stream_id: str) -> Path:
     return runtime_paths(memory_root).events_dir / f"{stream_id}.jsonl"
+
+
+def launcher_records_dir(memory_root: Path | str) -> Path:
+    return runtime_paths(memory_root).artifacts_dir / "launchers"
 
 
 def read_session_metadata(path: Path) -> dict[str, Any]:

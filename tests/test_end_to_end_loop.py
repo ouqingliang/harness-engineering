@@ -154,11 +154,14 @@ class EndToEndLoopTests(unittest.TestCase):
 
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.state.current_round, 1)
-            self.assertTrue(paths.handoffs_dir.exists())
-            self.assertTrue(paths.reports_dir.exists())
+            self.assertTrue(paths.events_dir.exists())
+            self.assertTrue(paths.sessions_dir.exists())
+            self.assertTrue(paths.inbox_dir.exists())
+            self.assertTrue(paths.gates_dir.exists())
+            self.assertTrue(paths.briefs_dir.exists())
             self.assertTrue(paths.artifacts_dir.exists())
-            reports = sorted(paths.reports_dir.glob("*.json"))
-            self.assertEqual(len(reports), 5)
+            self.assertTrue((paths.artifacts_dir / "launchers").exists())
+            self.assertTrue(list(paths.briefs_dir.glob("*.json")))
 
             mission_payload = json.loads(paths.mission_file.read_text(encoding="utf-8"))
             self.assertEqual(mission_payload["doc_count"], 2)

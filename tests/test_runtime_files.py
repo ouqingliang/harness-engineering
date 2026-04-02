@@ -145,6 +145,7 @@ class RuntimeFileTests(unittest.TestCase):
             self.assertTrue(paths.sessions_dir.exists())
             self.assertTrue(paths.inbox_dir.exists())
             self.assertTrue(paths.artifacts_dir.exists())
+            self.assertTrue((paths.artifacts_dir / "launchers").exists())
             self.assertTrue(paths.gates_dir.exists())
             self.assertTrue(paths.briefs_dir.exists())
             self.assertTrue(paths.worktrees_dir.exists())
