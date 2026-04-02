@@ -34,6 +34,7 @@ from lib.runtime_state import (
     save_mission,
     save_state,
     session_metadata_path,
+    supervisor_inbox_event_log_path,
     utc_now,
     write_brief_record,
     write_gate_record,
@@ -239,6 +240,16 @@ class RuntimeFileTests(unittest.TestCase):
             for row in event_rows:
                 append_event_row(event_path, row)
             self.assertEqual(load_jsonl_rows(event_path), event_rows)
+            supervisor_event_path = supervisor_inbox_event_log_path(memory_root)
+            supervisor_event_rows = [
+                {"event": "communication.message_recorded", "summary": "?? human ?????"},
+                {"event": "communication.gate_replied", "summary": "??????? supervisor inbox"},
+            ]
+            for row in supervisor_event_rows:
+                append_event_row(supervisor_event_path, row)
+            self.assertEqual(load_jsonl_rows(supervisor_event_path), supervisor_event_rows)
+            self.assertIn("?? human ?????", supervisor_event_path.read_text(encoding="utf-8"))
+
             self.assertIn("会话已启动", event_path.read_text(encoding="utf-8"))
 
             self.assertEqual(session_path.parent, paths.sessions_dir)
@@ -246,6 +257,7 @@ class RuntimeFileTests(unittest.TestCase):
             self.assertEqual(gate_path.parent, paths.gates_dir)
             self.assertEqual(brief_path.parent, paths.briefs_dir)
             self.assertEqual(event_path.parent, paths.events_dir)
+            self.assertEqual(supervisor_event_path.parent, paths.events_dir)
 
     def test_dead_running_launcher_is_marked_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

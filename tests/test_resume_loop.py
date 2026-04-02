@@ -8,7 +8,16 @@ import unittest
 from unittest.mock import patch
 
 from lib.communication_api import CommunicationStore
-from lib.runtime_state import HarnessConfig, RuntimeState, ensure_runtime_root, save_mission, save_state, utc_now
+from lib.runtime_state import (
+    HarnessConfig,
+    RuntimeState,
+    ensure_runtime_root,
+    load_jsonl_rows,
+    save_mission,
+    save_state,
+    supervisor_inbox_event_log_path,
+    utc_now,
+)
 from lib.scheduler_components.audit import run_saved_audit_request
 from lib.scheduler_components.design import run_saved_design_request
 from lib.scheduler import HarnessScheduler
@@ -141,7 +150,13 @@ class ResumeLoopTests(unittest.TestCase):
             self.assertTrue(first_pass.pending_gate_id)
 
             store = CommunicationStore(paths.harness_root)
-            store.reply_to_gate(first_pass.pending_gate_id or "", sender="human", body="Continue the mainline implementation.")
+            raw_reply = "Continue the mainline implementation.\n???????"
+            resolved_gate = store.reply_to_gate(first_pass.pending_gate_id or "", sender="human", body=raw_reply)
+            self.assertEqual(json.loads(Path(resolved_gate["answer_path"]).read_text(encoding="utf-8"))["answer"], raw_reply)
+            self.assertEqual(
+                load_jsonl_rows(supervisor_inbox_event_log_path(paths.memory_root))[-1]["event"],
+                "communication.gate_replied",
+            )
 
             with patch("lib.scheduler._launch_execution_subagent", side_effect=_launch_execution_immediately), patch(
                 "lib.scheduler_components.turns.launch_background_agent",

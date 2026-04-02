@@ -438,7 +438,7 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
       <section class="hero">
         <div class="eyebrow">Harness Monitor</div>
         <h1>{escape(str(mission.get("goal") or "Current harness run"))}</h1>
-        <p>This page is both the live monitor and the human-facing inbox for the harness. When a real decision is needed, reply here and the blocked agent will continue automatically.</p>
+        <p>This page stores raw human text in durable runtime state and exposes the current harness snapshot. It is a runtime-owned inbox and status surface, not a worker scheduler.</p>
         <div class="meta-row">
           <span>HTTP: 127.0.0.1:{escape(str(server.server_port))}</span>
           <span>Doc root: {escape(str(mission.get("doc_root") or ""))}</span>
@@ -477,7 +477,7 @@ def _render_human_page(server: "CodexAppServer", notice: str = "", error: str = 
         </div>
       </section>
       {gate_html}
-      <p class="footer">The page no longer hard-refreshes while you are typing. If the gate changes mid-draft, your text stays in place.</p>
+      <p class="footer">The page no longer hard-refreshes while you are typing. If the gate changes mid-draft, your text stays in place and is stored as raw runtime evidence when you submit it.</p>
     </main>
     <script>
       const INITIAL_MONITOR = {json.dumps(initial_monitor, ensure_ascii=False)};
@@ -744,7 +744,7 @@ class CodexAppRequestHandler(BaseHTTPRequestHandler):
             payload = _read_form_body(self)
             gate_id = str(payload.get("gate_id", "")).strip()
             sender = str(payload.get("sender", "human")).strip() or "human"
-            message = str(payload.get("message", "")).strip()
+            message = str(payload.get("message", ""))
             if not gate_id:
                 _redirect(self, "/?error=" + quote("Missing gate id"))
                 return
@@ -763,7 +763,7 @@ class CodexAppRequestHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 _redirect(self, "/?error=" + quote(str(exc)))
                 return
-            _redirect(self, "/?notice=" + quote("Reply sent. The harness will continue automatically."))
+            _redirect(self, "/?notice=" + quote("Reply stored in runtime state for the supervisor."))
             return
 
         payload = _read_json_body(self)

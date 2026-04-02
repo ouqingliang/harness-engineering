@@ -60,7 +60,7 @@ class QuestionRoutingConfigTests(unittest.TestCase):
             )
 
             self.assertEqual(route, "gate")
-            self.assertEqual(scheduler.state.active_agent, "communication")
+            self.assertEqual(scheduler.state.active_agent, "")
             self.assertEqual(scheduler.state.extra["blocked_agent"], "design")
             self.assertEqual(scheduler.state.extra["resume_agent"], "design")
             self.assertEqual(

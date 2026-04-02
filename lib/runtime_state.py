@@ -13,6 +13,7 @@ HARNESS_DIR_NAME = ".harness"
 MISSION_FILE_NAME = "mission.json"
 STATE_FILE_NAME = "state.json"
 EVENTS_DIR_NAME = "events"
+SUPERVISOR_INBOX_EVENT_STREAM_ID = "supervisor-inbox"
 SESSIONS_DIR_NAME = "sessions"
 INBOX_DIR_NAME = "inbox"
 ARTIFACTS_DIR_NAME = "artifacts"
@@ -36,6 +37,7 @@ class RuntimePaths:
     mission_file: Path
     state_file: Path
     events_dir: Path
+    supervisor_inbox_event_log: Path
     sessions_dir: Path
     inbox_dir: Path
     artifacts_dir: Path
@@ -253,6 +255,7 @@ def runtime_paths(memory_root: Path | str) -> RuntimePaths:
         mission_file=harness_root / MISSION_FILE_NAME,
         state_file=harness_root / STATE_FILE_NAME,
         events_dir=harness_root / EVENTS_DIR_NAME,
+        supervisor_inbox_event_log=harness_root / EVENTS_DIR_NAME / f"{SUPERVISOR_INBOX_EVENT_STREAM_ID}.jsonl",
         sessions_dir=harness_root / SESSIONS_DIR_NAME,
         inbox_dir=harness_root / INBOX_DIR_NAME,
         artifacts_dir=harness_root / ARTIFACTS_DIR_NAME,
@@ -266,6 +269,7 @@ def ensure_runtime_layout(memory_root: Path | str) -> RuntimePaths:
     paths = runtime_paths(memory_root)
     paths.harness_root.mkdir(parents=True, exist_ok=True)
     paths.events_dir.mkdir(parents=True, exist_ok=True)
+    paths.supervisor_inbox_event_log.touch(exist_ok=True)
     paths.sessions_dir.mkdir(parents=True, exist_ok=True)
     paths.inbox_dir.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -298,6 +302,10 @@ def brief_record_path(memory_root: Path | str, brief_id: str) -> Path:
 
 def event_log_path(memory_root: Path | str, stream_id: str) -> Path:
     return runtime_paths(memory_root).events_dir / f"{stream_id}.jsonl"
+
+
+def supervisor_inbox_event_log_path(memory_root: Path | str) -> Path:
+    return event_log_path(memory_root, SUPERVISOR_INBOX_EVENT_STREAM_ID)
 
 
 def launcher_records_dir(memory_root: Path | str) -> Path:
@@ -345,6 +353,10 @@ def append_event_row(path: Path, payload: Mapping[str, Any]) -> Path:
     with path.open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True) + "\n")
     return path
+
+
+def append_supervisor_inbox_event(memory_root: Path | str, payload: Mapping[str, Any]) -> Path:
+    return append_event_row(supervisor_inbox_event_log_path(memory_root), payload)
 
 
 def load_jsonl_rows(path: Path) -> list[dict[str, Any]]:

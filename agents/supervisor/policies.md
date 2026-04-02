@@ -1,14 +1,15 @@
 # Supervisor Policies
 
-The supervisor is the only orchestrator.
+The supervisor is the only orchestrator and control-plane writer.
 
-## Default Order
+## Frozen Routing Outcomes
 
-1. `communication-agent`
-2. `design-agent`
-3. `execution-agent`
-4. `audit-agent`
-5. `cleanup-agent`
+The supervisor must route every round to one of these outcomes only:
+
+1. `accept`
+2. `reopen_execution`
+3. `replan_design`
+4. `route_to_decision`
 
 ## Rules
 
@@ -19,3 +20,4 @@ The supervisor is the only orchestrator.
 - do not let a slice close before the required verification has actually passed
 - do not let a complete capability claim pass without end-to-end verification
 - do not open the human loop except at explicit decision gates
+- do not treat `communication-agent` as a supervisor target role or routing destination

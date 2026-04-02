@@ -450,6 +450,41 @@ class SchedulerRoundTests(unittest.TestCase):
             self.assertEqual(persisted_state.extra["status"], "running")
             self.assertEqual(persisted_state.extra.get("pending_gate_id", ""), "")
 
+    def test_route_to_decision_publishes_worker_blocked_before_human_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            _, _, scheduler = self._seed_runtime(temp_path)
+
+            route = scheduler._route_questions(
+                "design",
+                {
+                    "questions": [
+                        {
+                            "question_id": "q-gate-001",
+                            "agent": "design",
+                            "question": "Should we stop for the conflict gate?",
+                            "blocking": True,
+                            "importance": "high",
+                            "tags": ["goal_conflict"],
+                            "context": {"marker": "decision-gate"},
+                        }
+                    ]
+                },
+            )
+
+            self.assertEqual(route, "gate")
+            self.assertEqual(scheduler.state.extra["blocked_agent"], "design")
+            self.assertEqual(scheduler.state.extra["resume_agent"], "design")
+            self.assertTrue(scheduler.state.extra["pending_gate_id"])
+            self.assertEqual(scheduler.state.active_agent, "")
+            self.assertNotEqual(scheduler.state.active_agent, scheduler.communication_agent_id)
+
+            recent_events = scheduler.state.extra["recent_events"]
+            self.assertEqual([event["kind"] for event in recent_events[-2:]], ["worker_blocked", "human_gate_opened"])
+            self.assertEqual(recent_events[-2]["outcome"], "route_to_decision")
+            self.assertEqual(recent_events[-1]["outcome"], "route_to_decision")
+            self.assertEqual(recent_events[-1]["subject"], "design")
+
     def test_design_prefetches_the_next_slice_into_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

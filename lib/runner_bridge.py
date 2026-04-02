@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from lib.communication_api import CommunicationStore, coerce_gate_payload, pending_gates
+from lib.communication_api import CommunicationStore, pending_gates
 from lib.runtime_contract import (
     SESSION_CONTROL_FIELD,
     TASK_NOTIFICATION_FIELD,
@@ -93,7 +93,7 @@ def _normalize_runtime_paths(runtime_paths: Mapping[str, Any] | None, runtime_ro
     report_dir = Path(runtime_paths.get("report_dir", runtime_root / "reports"))
     launcher_dir = Path(runtime_paths.get("launcher_dir", runtime_root / "launchers" / "codex_app_server"))
     state_file = Path(runtime_paths.get("state_file", launcher_dir / "state.json"))
-    communication_state_file = Path(runtime_paths.get("communication_state_file", runtime_root / "launchers" / "communication" / "state.json"))
+    communication_state_file = Path(runtime_paths.get("communication_state_file", runtime_root / "inbox" / "communication" / "state.json"))
     return {
         "runtime_root": runtime_root,
         "handoff_dir": handoff_dir,
@@ -153,31 +153,6 @@ def _default_turn_executor(turn: RunnerTurn) -> dict[str, Any]:
         "artifacts": [str(turn.handoff_path)],
         "next_hint": "supervisor decides next step",
     }
-    if agent_id == "communication":
-        open_gate_spec = turn.mission.get("decision_gate")
-        if open_gate_spec:
-            gate_payload = coerce_gate_payload(open_gate_spec) if isinstance(open_gate_spec, Mapping) else {
-                "title": "Decision gate",
-                "prompt": str(open_gate_spec),
-                "source": "communication-agent",
-                "severity": "decision_gate",
-                "context": None,
-            }
-            gate = turn.communication_store.open_gate(**gate_payload)
-            report.update(
-                {
-                    "status": "blocked",
-                    "summary": f"Opened decision gate {gate['id']}",
-                    "gate_id": gate["id"],
-                    "artifacts": [str(turn.communication_store.state_file)],
-                    "next_hint": "wait for human reply",
-                }
-            )
-        else:
-            open_gate_ids = [gate["id"] for gate in pending_gates(turn.communication_store)]
-            report["summary"] = f"Communication surface is ready; {len(open_gate_ids)} gate(s) pending."
-            if open_gate_ids:
-                report["artifacts"] = [str(turn.communication_store.state_file)]
     return report
 
 

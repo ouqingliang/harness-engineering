@@ -991,6 +991,8 @@ class SchedulerVerificationTests(unittest.TestCase):
             self.assertEqual(audit_report["status"], "accepted")
             self.assertTrue(audit_payload["accepted"])
             self.assertEqual(audit_payload["findings"], [])
+            self.assertEqual(audit_report["supervisor_event"]["kind"], "supervisor_route_outcome")
+            self.assertEqual(audit_report["supervisor_event"]["outcome"], "accept")
 
     def test_audit_reopens_when_verification_evidence_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1059,6 +1061,8 @@ class SchedulerVerificationTests(unittest.TestCase):
             self.assertEqual(audit_report["status"], "reopen_execution")
             self.assertFalse(audit_payload["accepted"])
             self.assertTrue(any("returned 3" in finding for finding in audit_payload["findings"]))
+            self.assertEqual(audit_report["supervisor_event"]["kind"], "supervisor_route_outcome")
+            self.assertEqual(audit_report["supervisor_event"]["outcome"], "reopen_execution")
 
     def test_external_project_repeated_reopen_auto_replans_without_human_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

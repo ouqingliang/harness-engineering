@@ -10,6 +10,12 @@ from urllib.parse import urlencode
 
 from lib.communication_api import CommunicationStore, create_server, pending_gates
 from lib.runner_bridge import RunnerBridge, run_agent
+from lib.runtime_state import (
+    inbox_message_path,
+    load_jsonl_rows,
+    read_inbox_message,
+    supervisor_inbox_event_log_path,
+)
 from lib.supervisor_bridge import SupervisorBridge
 
 
@@ -81,6 +87,24 @@ class RunnerBridgeTests(unittest.TestCase):
             self.assertEqual(snapshot["runtime_root"], str(runtime_root))
             self.assertEqual(snapshot["pending_gates"], [])
             self.assertTrue(Path(snapshot["runtime_paths"]["state_file"]).exists())
+            communication_state_file = Path(snapshot["runtime_paths"]["communication_state_file"])
+            self.assertEqual(communication_state_file.parent.name, "communication")
+            self.assertEqual(communication_state_file.parent.parent.name, "inbox")
+
+    def test_communication_agent_is_treated_like_a_regular_runner(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            runtime_root = Path(temp_dir) / ".harness"
+            bridge = RunnerBridge(runtime_root)
+            result = bridge.run_agent(
+                {"id": "communication", "name": "Communication Surface", "goal": "Store raw human text."},
+                {"goal": "store raw human text", "inputs": {}, "decision_gate": {"title": "Need decision", "prompt": "Approve the mainline?"}},
+                mission={"goal": "store raw human text", "decision_gate": {"title": "Need decision", "prompt": "Approve the mainline?"}},
+                state={"runtime_root": str(runtime_root), "cycle_id": "cycle-communication", "last_agent": "supervisor"},
+            )
+
+            self.assertEqual(result["report"]["status"], "completed")
+            self.assertNotIn("gate_id", result["report"])
+            self.assertEqual(pending_gates(bridge.communication_store), [])
 
 
 class SupervisorBridgeTests(unittest.TestCase):
@@ -182,9 +206,16 @@ class CommunicationServerTests(unittest.TestCase):
                 self.assertEqual(payload["runtime"]["state"]["active_agent"], "design")
                 self.assertEqual(payload["runtime"]["agent_statuses"][0]["id"], "design")
 
-                status, payload = _request_json(port, "POST", "/communication/messages", {"sender": "human", "body": "hello communication agent"})
+                raw_message = "  hello communication agent  \n"
+                status, payload = _request_json(port, "POST", "/communication/messages", {"sender": "human", "body": raw_message})
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["message"]["sender"], "human")
+                message_id = payload["message"]["id"]
+                self.assertEqual(read_inbox_message(inbox_message_path(runtime_root.parent, message_id))["body"], raw_message)
+                self.assertEqual(
+                    load_jsonl_rows(supervisor_inbox_event_log_path(runtime_root.parent))[-1]["event"],
+                    "communication.message_recorded",
+                )
 
                 status, payload = _request_json(port, "POST", "/communication/gates", {"title": "Need decision", "prompt": "Approve the mainline?"})
                 self.assertEqual(status, 200)
@@ -221,18 +252,25 @@ class CommunicationServerTests(unittest.TestCase):
                 self.assertIn("Need decision", body)
                 self.assertIn("Approve the mainline?", body)
 
+                raw_reply = "  Proceed from the human page\nwith UTF-8: ??  "
                 status, _, headers = _request_text(
                     port,
                     "POST",
                     "/human/reply",
-                    {"gate_id": gate_id, "sender": "human", "message": "Proceed from the human page"},
+                    {"gate_id": gate_id, "sender": "human", "message": raw_reply},
                 )
                 self.assertEqual(status, 303)
                 self.assertIn("/?notice=", headers.get("Location", ""))
 
                 status, payload = _request_json(port, "GET", "/communication/gates")
                 self.assertEqual(status, 200)
-                self.assertTrue(any(gate["id"] == gate_id and gate["status"] == "resolved" for gate in payload["gates"]))
+                resolved_gate = next(gate for gate in payload["gates"] if gate["id"] == gate_id)
+                self.assertEqual(resolved_gate["status"], "resolved")
+                self.assertEqual(read_inbox_message(Path(resolved_gate["answer_path"]))["answer"], raw_reply)
+                self.assertEqual(
+                    load_jsonl_rows(supervisor_inbox_event_log_path(runtime_root.parent))[-1]["event"],
+                    "communication.gate_replied",
+                )
 
                 status, payload = _request_json(port, "POST", "/communication/gates", {"title": "Need another decision", "prompt": "Approve the follow-up?"})
                 self.assertEqual(status, 200)

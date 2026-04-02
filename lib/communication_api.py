@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from .runtime_state import append_event_row, write_inbox_message
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
@@ -41,6 +44,14 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 def _json_copy(payload: Any) -> Any:
     return json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def _supervisor_inbox_event_log_path(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "events" / "supervisor-inbox.jsonl"
+
+
+def _append_supervisor_inbox_event(runtime_root: Path, payload: Mapping[str, Any]) -> Path:
+    return append_event_row(_supervisor_inbox_event_log_path(runtime_root), payload)
 
 
 @dataclass(frozen=True)
@@ -106,6 +117,8 @@ class CommunicationStore:
 
     def ensure(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        _supervisor_inbox_event_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
+        _supervisor_inbox_event_log_path(self.runtime_root).touch(exist_ok=True)
         if not self.state_file.exists():
             self._save(self._default_state())
 
@@ -169,11 +182,10 @@ class CommunicationStore:
     ) -> dict[str, Any]:
         if not sender:
             raise ValueError("sender is required")
-        if not body:
+        if body is None or body == "":
             raise ValueError("body is required")
 
         with self._lock:
-            state = self._load()
             message = CommunicationMessage(
                 id=_new_id("msg"),
                 sender=sender,
@@ -182,6 +194,21 @@ class CommunicationStore:
                 gate_id=gate_id,
                 kind=kind,
             ).to_dict()
+            message_path = Path(self.runtime_root) / "inbox" / f"{message['id']}.json"
+            write_inbox_message(message_path, message)
+            _append_supervisor_inbox_event(
+                self.runtime_root,
+                {
+                    "event": "communication.message_recorded",
+                    "message_id": message["id"],
+                    "gate_id": message.get("gate_id"),
+                    "sender": message["sender"],
+                    "kind": message["kind"],
+                    "record_path": str(message_path),
+                    "created_at": message["created_at"],
+                },
+            )
+            state = self._load()
             state["messages"].append(message)
             state["updated_at"] = _utc_now()
             self._save(state)
@@ -241,7 +268,7 @@ class CommunicationStore:
             raise ValueError("gate_id is required")
         if not sender:
             raise ValueError("sender is required")
-        if not body:
+        if body is None or body == "":
             raise ValueError("body is required")
 
         with self._lock:
@@ -257,17 +284,30 @@ class CommunicationStore:
                 raise ValueError(f"gate {gate_id} is already resolved")
 
             now = _utc_now()
-            gate["status"] = "resolved"
-            gate["updated_at"] = now
-            gate["resolved_at"] = now
-            gate["resolved_by"] = sender
-            gate["resolution"] = body
             answer = write_human_reply(
                 self.runtime_root,
                 gate_id=gate_id,
                 body=body,
                 sender=sender,
             )
+            _append_supervisor_inbox_event(
+                self.runtime_root,
+                {
+                    "event": "communication.gate_replied",
+                    "gate_id": gate_id,
+                    "message_id": answer["id"],
+                    "sender": sender,
+                    "record_path": answer["answer_path"],
+                    "created_at": answer["created_at"],
+                },
+            )
+            gate["status"] = "resolved"
+            gate["updated_at"] = now
+            gate["resolved_at"] = now
+            gate["resolved_by"] = sender
+            gate["resolution"] = body
+            gate["answer_path"] = answer["answer_path"]
+            gate["answer_id"] = answer["id"]
             state["messages"].append(
                 CommunicationMessage(
                     id=_new_id("msg"),
@@ -280,8 +320,6 @@ class CommunicationStore:
             )
             state["updated_at"] = now
             self._save(state)
-            gate["answer_path"] = answer["answer_path"]
-            gate["answer_id"] = answer["id"]
             return deepcopy(gate)
 
     def pending_gate(self) -> dict[str, Any] | None:
@@ -306,12 +344,13 @@ def write_human_reply(
 ) -> dict[str, Any]:
     runtime_root = Path(runtime_root)
     answer_id = _new_id("answer")
-    answer_path = runtime_root / "inbox" / f"{answer_id}.json"
+    answer_path = Path(runtime_root) / "inbox" / f"{answer_id}.json"
     record = {
         "id": answer_id,
         "message_id": answer_id,
         "question_id": gate_id,
         "gate_id": gate_id,
+        "body": body,
         "answer": body,
         "sender": sender,
         "source": source,

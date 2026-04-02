@@ -57,6 +57,7 @@ ARCHITECTURE_BASELINE_DOCS = (
     "designs/2026-03-25-center-subsystem-architecture-outline.md",
     "plans/2026-03-25-task-mainline-and-engineernode-removal.md",
 )
+SUPERVISOR_ROUTING_OUTCOMES = ("accept", "reopen_execution", "replan_design", "route_to_decision")
 
 
 @dataclass(frozen=True, slots=True)
@@ -802,10 +803,8 @@ class HarnessScheduler:
         self.state.extra.setdefault("status", "running")
         if "last_cleanup_maintenance_at" not in self.state.extra:
             self.state.extra["last_cleanup_maintenance_at"] = self.state.last_run_at or utc_now()
-        if self._communication_side_channel_pending() and self.communication_agent_id:
-            self.state.active_agent = self.communication_agent_id
-        elif self.state.active_agent == self.communication_agent_id and not self._communication_side_channel_pending():
-            self.state.active_agent = self._default_work_entry_agent()
+        if self.state.active_agent == self.communication_agent_id:
+            self.state.active_agent = ""
         elif self.state.active_agent == self.cleanup_agent_id and not self._cleanup_mode():
             self.state.active_agent = self._default_work_entry_agent()
         elif self.state.active_agent and self.state.active_agent not in self.specs_by_id:
@@ -1196,6 +1195,77 @@ class HarnessScheduler:
         )
         self.state.extra["recent_events"] = events[-25:]
 
+    def _publish_supervisor_event(
+        self,
+        *,
+        kind: str,
+        summary: str,
+        outcome: str = "",
+        subject: str = "",
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        event: dict[str, Any] = {
+            "recorded_at": utc_now(),
+            "kind": kind,
+            "summary": summary,
+            "details": dict(details or {}),
+        }
+        if outcome:
+            event["outcome"] = outcome
+        if subject:
+            event["subject"] = subject
+        events = self._recent_events()
+        events.append(event)
+        self.state.extra["recent_events"] = events[-25:]
+
+    def _record_supervisor_route_outcome(
+        self,
+        outcome: str,
+        *,
+        subject: str,
+        summary: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        if outcome not in SUPERVISOR_ROUTING_OUTCOMES:
+            raise ValueError(f"unsupported supervisor routing outcome: {outcome}")
+        self.state.extra["supervisor_route_outcome"] = outcome
+        self.state.extra["supervisor_route_subject"] = subject
+        self.state.extra["supervisor_route_summary"] = summary
+        self._publish_supervisor_event(
+            kind="supervisor_route_outcome",
+            summary=summary,
+            outcome=outcome,
+            subject=subject,
+            details=details,
+        )
+
+    def _record_supervisor_event_from_report(self, agent_id: str, report: Mapping[str, Any]) -> None:
+        event = report.get("supervisor_event")
+        if not isinstance(event, Mapping):
+            return
+        kind = coerce_str(event.get("kind")).strip()
+        if not kind:
+            return
+        summary = coerce_str(event.get("summary")).strip() or coerce_str(report.get("summary")).strip()
+        outcome = coerce_str(event.get("outcome")).strip()
+        subject = coerce_str(event.get("subject")).strip() or agent_id
+        details = event.get("details", {})
+        if not isinstance(details, Mapping):
+            details = {}
+        if kind == "supervisor_route_outcome":
+            if outcome not in SUPERVISOR_ROUTING_OUTCOMES:
+                raise ValueError(f"unsupported supervisor routing outcome: {outcome}")
+            self.state.extra["supervisor_route_outcome"] = outcome
+            self.state.extra["supervisor_route_subject"] = subject
+            self.state.extra["supervisor_route_summary"] = summary
+        self._publish_supervisor_event(
+            kind=kind,
+            summary=summary or coerce_str(report.get("summary")).strip(),
+            outcome=outcome,
+            subject=subject,
+            details=details,
+        )
+
     def _request_scheduler_yield(self) -> None:
         self.state.extra["scheduler_yield"] = True
 
@@ -1321,21 +1391,7 @@ class HarnessScheduler:
                 "current_slice": current_slice,
                 "current_brief": current_brief,
             }
-            if agent_id == self.communication_agent_id:
-                if latest_human_reply:
-                    entry["status"] = "reply_buffered"
-                    entry["summary"] = "A human reply is buffered for supervisor resume."
-                elif pending_gate_id:
-                    entry["status"] = "waiting_human"
-                    entry["summary"] = "Waiting for a human decision through the communication page."
-                    entry["details"] = [f"gate_id={pending_gate_id}"]
-                elif communication_brief:
-                    entry["status"] = "opening_gate"
-                    entry["summary"] = "Preparing a supervisor decision brief for the human page."
-                elif active_agent == agent_id:
-                    entry["status"] = "running"
-                    entry["summary"] = "Processing communication-side work."
-            elif agent_id == self.design_agent_id:
+            if agent_id == self.design_agent_id:
                 if running_for_agent:
                     entry["status"] = "running"
                     entry["summary"] = "Design is running in the background."
@@ -1451,7 +1507,8 @@ class HarnessScheduler:
             self.state.extra.pop("latest_human_reply", None)
 
     def _communication_side_channel_pending(self) -> bool:
-        return self._communication_brief() is not None or self._latest_human_reply() is not None
+        # A stored human reply is historical context, not an active scheduling lane.
+        return self._communication_brief() is not None
 
     def _cleanup_mode(self) -> str:
         return coerce_str(self.state.extra.get("cleanup_mode")).strip()
@@ -1550,9 +1607,6 @@ class HarnessScheduler:
         if runtime_status == "completed":
             return
         if self._communication_side_channel_pending():
-            if self.communication_agent_id:
-                self.state.active_agent = self.communication_agent_id
-                self._save_runtime()
             return
         if self.state.active_agent:
             return
@@ -1693,9 +1747,12 @@ class HarnessScheduler:
             self._set_pending_supervisor_decision(None)
         self.mission.status = "active"
         self._set_latest_human_reply(answer_payload)
+        self._set_communication_brief(None)
         self.state.extra["applied_answer_id"] = answer_payload.get("id", "")
         self.state.extra["pending_gate_id"] = ""
-        self.state.active_agent = self.communication_agent_id or self.state.extra["resume_agent"]
+        resume_agent = coerce_str(self.state.extra.get("resume_agent")).strip() or blocked_agent or self._default_work_entry_agent()
+        self.state.active_agent = resume_agent
+        self.state.extra["resume_agent"] = resume_agent
         self._set_runtime_status("running")
         self._save_runtime()
         return True
@@ -1911,6 +1968,7 @@ class HarnessScheduler:
         return {
             "decision_id": question.question_id,
             "title": coerce_str(context.get("title")).strip() or f"{agent_id} needs a decision",
+            "summary": question.question,
             "question": question.question,
             "severity": question.tags[0] if question.tags else "decision_gate",
             "why_not_auto_answered": why_not_auto_answered,
@@ -1934,13 +1992,13 @@ class HarnessScheduler:
         lines = [coerce_str(brief.get("question")).strip()]
         source_ref = coerce_str(brief.get("source_ref")).strip()
         if source_ref:
-            lines.append(f"来源: {source_ref}")
+            lines.append(f"閺夈儲绨? {source_ref}")
         reason = coerce_str(brief.get("why_not_auto_answered")).strip()
         if reason:
-            lines.append(f"需要人工决策的原因: {reason}")
+            lines.append(f"闂団偓鐟曚椒姹夊銉ュ枀缁涙牜娈戦崢鐔锋礈: {reason}")
         options = brief.get("options", [])
         if isinstance(options, list) and options:
-            lines.append("可选项:")
+            lines.append("閸欘垶鈧銆?")
             for option in options:
                 if isinstance(option, Mapping):
                     label = coerce_str(option.get("label") or option.get("value")).strip()
@@ -1951,17 +2009,17 @@ class HarnessScheduler:
                         lines.append(f"- {label}")
         tradeoffs = brief.get("tradeoffs", [])
         if isinstance(tradeoffs, list) and tradeoffs:
-            lines.append("权衡:")
+            lines.append("閺夊啳銆€:")
             for item in tradeoffs:
                 text = coerce_str(item).strip()
                 if text:
                     lines.append(f"- {text}")
         recommendation = coerce_str(brief.get("supervisor_recommendation")).strip()
         if recommendation:
-            lines.append(f"Supervisor 建议: {recommendation}")
+            lines.append(f"Supervisor 瀵ら缚顔? {recommendation}")
         reply_shape = coerce_str(brief.get("required_reply_shape")).strip()
         if reply_shape:
-            lines.append(f"请回复: {reply_shape}")
+            lines.append(f"鐠囧嘲娲栨径? {reply_shape}")
         return "\n".join(item for item in lines if item)
 
     def _execute_turn(self, turn: RunnerTurn) -> dict[str, Any]:
@@ -2030,22 +2088,30 @@ class HarnessScheduler:
         self.state.extra["resume_agent"] = agent_id
         self._set_communication_brief(brief)
         self._set_latest_human_reply(None)
-        if self.communication_agent_id:
-            self.state.active_agent = self.communication_agent_id
-            self._set_runtime_status("running")
-            self.mission.status = "active"
-        else:
-            gate = self.communication_store.open_gate(
-                title=brief["title"],
-                prompt=self._render_communication_prompt(brief),
-                source="supervisor",
-                severity=brief["severity"],
-                context=json.dumps(brief, ensure_ascii=False),
-            )
-            self.state.extra["pending_gate_id"] = gate["id"]
-            self.state.active_agent = ""
-            self._set_runtime_status("waiting_human")
-            self.mission.status = "waiting_human"
+        gate = self.communication_store.open_gate(
+            title=brief["title"],
+            prompt=self._render_communication_prompt(brief),
+            source="supervisor",
+            severity=brief["severity"],
+            context=json.dumps(brief, ensure_ascii=False),
+        )
+        self.state.extra["pending_gate_id"] = gate["id"]
+        self.state.active_agent = ""
+        gate_summary = coerce_str(brief.get("summary")).strip() or coerce_str(brief.get("title")).strip()
+        self._publish_supervisor_event(
+            kind="human_gate_opened",
+            summary=gate_summary or "Opened a human decision gate.",
+            outcome="route_to_decision",
+            subject=agent_id,
+            details={
+                "gate_id": gate["id"],
+                "blocked_agent": agent_id,
+                "question_id": coerce_str(question.question_id).strip(),
+                "why_not_auto_answered": why_not_auto_answered,
+            },
+        )
+        self._set_runtime_status("waiting_human")
+        self.mission.status = "waiting_human"
         self._save_runtime()
 
     def _build_execution_retry_brief(
@@ -2167,6 +2233,17 @@ class HarnessScheduler:
             save_question(self.paths.memory_root, question.question_id, question)
             route = route_question(question)
             if route.is_gate:
+                self._publish_supervisor_event(
+                    kind="worker_blocked",
+                    summary=coerce_str(question.question).strip() or "A worker requires supervisor routing.",
+                    outcome="route_to_decision",
+                    subject=agent_id,
+                    details={
+                        "question_id": question.question_id,
+                        "importance": question.importance,
+                        "tags": list(question.tags),
+                    },
+                )
                 self._open_communication_lane(
                     agent_id,
                     question,
@@ -2180,6 +2257,17 @@ class HarnessScheduler:
                 if question.context.get("candidate_paths"):
                     self.mission.extra["selected_primary_doc"] = answer.answer
                 continue
+            self._publish_supervisor_event(
+                kind="worker_blocked",
+                summary=coerce_str(question.question).strip() or "A worker requires supervisor routing.",
+                outcome="route_to_decision",
+                subject=agent_id,
+                details={
+                    "question_id": question.question_id,
+                    "importance": question.importance,
+                    "tags": list(question.tags),
+                },
+            )
             self._open_communication_lane(
                 agent_id,
                 question,
@@ -2202,33 +2290,10 @@ class HarnessScheduler:
     def _advance_after_report(self, agent_id: str, result: Mapping[str, Any]) -> None:
         report = dict(result["report"])
         self._record_result(agent_id, result)
+        self._record_supervisor_event_from_report(agent_id, report)
         status = coerce_str(report.get("status"), "completed").strip()
         self.mission.status = "active"
         self._set_runtime_status("running")
-
-        if agent_id == self.communication_agent_id:
-            action = coerce_str(report.get("communication_action")).strip()
-            if action == "gate_opened" and report.get("gate_id"):
-                self.mission.status = "waiting_human"
-                self.state.active_agent = ""
-                self.state.extra["pending_gate_id"] = str(report.get("gate_id", ""))
-                self._set_runtime_status("waiting_human")
-                self._save_runtime()
-                return
-            if action == "reply_recorded":
-                self._set_latest_human_reply(None)
-                self._set_communication_brief(None)
-                self.state.extra.pop("blocked_agent", None)
-                next_agent = coerce_str(
-                    self.state.extra.get("resume_agent") or self.state.extra.get("blocked_agent")
-                ).strip()
-                self.state.active_agent = next_agent or self._default_work_entry_agent()
-                self.state.extra.pop("resume_agent", None)
-                self._save_runtime()
-                return
-            self.state.active_agent = self._default_work_entry_agent()
-            self._save_runtime()
-            return
 
         if agent_id == self.design_agent_id:
             design_status = coerce_str(report.get("design_status")).strip()
@@ -2376,6 +2441,12 @@ class HarnessScheduler:
                 else []
             )
             if audit_status == "accepted":
+                self._record_supervisor_route_outcome(
+                    "accept",
+                    subject=agent_id,
+                    summary=coerce_str(report.get("summary")).strip() or "Audit accepted the current round.",
+                    details={"audit_status": audit_status},
+                )
                 self._clear_audit_reopen_tracking()
                 self._set_pending_execution_brief(None)
                 self.state.extra.pop("last_failure_findings", None)
@@ -2408,6 +2479,12 @@ class HarnessScheduler:
                     self._save_runtime()
                 return
             if audit_status == "replan_design":
+                self._record_supervisor_route_outcome(
+                    "replan_design",
+                    subject=agent_id,
+                    summary=coerce_str(report.get("summary")).strip() or "Audit requested a new design contract before execution can continue.",
+                    details={"audit_status": audit_status},
+                )
                 self._clear_audit_reopen_tracking()
                 self._set_pending_execution_brief(None)
                 self.state.extra["last_failure_findings"] = audit_findings
@@ -2415,6 +2492,12 @@ class HarnessScheduler:
                 self.state.active_agent = self.design_agent_id or self._default_work_entry_agent()
                 self._save_runtime()
                 return
+            self._record_supervisor_route_outcome(
+                "reopen_execution",
+                subject=agent_id,
+                summary=coerce_str(report.get("summary")).strip() or "Audit reopened the round and returned it to execution.",
+                details={"audit_status": audit_status},
+            )
             reopen_streak = self._record_audit_reopen(
                 audit_findings,
                 design_contract=audit_design_contract,

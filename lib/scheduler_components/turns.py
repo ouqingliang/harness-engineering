@@ -11,6 +11,27 @@ from .background_runtime import launch_background_agent, load_launcher_status, r
 from .support import DEFAULT_EXECUTION_OUTPUT, _normalize_text_list, _write_json
 
 
+def _supervisor_event(
+    *,
+    kind: str,
+    summary: str,
+    outcome: str = "",
+    subject: str = "",
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "kind": kind,
+        "summary": summary,
+    }
+    if outcome:
+        event["outcome"] = outcome
+    if subject:
+        event["subject"] = subject
+    if details:
+        event["details"] = dict(details)
+    return event
+
+
 def execute_turn(
     scheduler: Any,
     turn: RunnerTurn,
@@ -39,8 +60,6 @@ def execute_turn(
         else project_root_from_doc_root(doc_root)
     )
 
-    if agent_id == scheduler.communication_agent_id:
-        return _execute_communication_turn(scheduler, turn, inputs)
     if agent_id == scheduler.design_agent_id:
         return _execute_design_turn(
             scheduler,
@@ -181,7 +200,7 @@ def _execute_design_turn(
                 {
                     "question_id": new_id("question"),
                     "agent": "design",
-                    "question": "褰撳墠 doc 涓荤洰褰曚笅娌℃湁鍙鐨勬€讳綋瑙勫垝/璁捐鏂囨。锛屾槸鍚﹂渶瑕侀噸鏂版寚瀹氭枃妗ｇ洰褰曪紵",
+                    "question": "No docs were discovered under the provided doc root. Should supervisor choose a different planning document root?",
                     "blocking": True,
                     "importance": "high",
                     "tags": ["goal_conflict"],
@@ -225,7 +244,7 @@ def _execute_design_turn(
                 {
                     "question_id": new_id("question"),
                     "agent": "design",
-                    "question": "搴旇浼樺厛浠ュ摢涓鍒掓枃妗ｄ綔涓哄綋鍓嶄富绾垮叆鍙ｏ紵",
+                    "question": "No docs were discovered under the provided doc root. Should supervisor choose a different planning document root?",
                     "blocking": False,
                     "importance": "low",
                     "tags": ["path"],
@@ -404,12 +423,22 @@ def _execute_design_turn(
             "status": "completed",
             "summary": "Design found no remaining planned slices to execute.",
             "design_status": "completed",
+            "supervisor_event": _supervisor_event(
+                kind="worker_completed",
+                summary="Design found no remaining planned slices to execute.",
+                subject="design",
+            ),
             "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
         }
     return {
         "status": "completed",
         "summary": f"Prepared the next slice from {doc_bundle.get('doc_count', 0)} document(s).",
         "design_status": "ready",
+        "supervisor_event": _supervisor_event(
+            kind="worker_completed",
+            summary=f"Prepared the next slice from {doc_bundle.get('doc_count', 0)} document(s).",
+            subject="design",
+        ),
         "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
     }
 
@@ -435,6 +464,13 @@ def _execute_execution_turn(
         return {
             "status": "blocked",
             "summary": "Execution could not find a usable design contract.",
+            "supervisor_event": _supervisor_event(
+                kind="worker_blocked",
+                summary="Execution could not find a usable design contract.",
+                outcome="route_to_decision",
+                subject="execution",
+                details={"reason": "missing_design_contract"},
+            ),
             "questions": [
                 {
                     "question_id": new_id("question"),
@@ -741,6 +777,16 @@ def _execute_execution_turn(
         return {
             "status": "blocked",
             "summary": coerce_str(execution_output.get("summary")).strip() or "Execution needs a decision before it can continue.",
+            "supervisor_event": _supervisor_event(
+                kind="human_gate",
+                summary=coerce_str(execution_output.get("summary")).strip() or "Execution needs a decision before it can continue.",
+                outcome="route_to_decision",
+                subject="execution",
+                details={
+                    "required_reply_shape": coerce_str(execution_output.get("required_reply_shape")).strip(),
+                    "decision_tags": _normalize_text_list(execution_output.get("decision_tags", [])) or ["goal_conflict"],
+                },
+            ),
             "questions": [
                 {
                     "question_id": new_id("question"),
@@ -818,6 +864,12 @@ def _execute_execution_turn(
     return {
         "status": "completed",
         "summary": f"Ran {len(verification_runs)} verification command(s); {sum(1 for run in verification_runs if run.get('returncode') == 0)} passed.",
+        "supervisor_event": _supervisor_event(
+            kind="worker_completed",
+            summary=f"Ran {len(verification_runs)} verification command(s); {sum(1 for run in verification_runs if run.get('returncode') == 0)} passed.",
+            subject="execution",
+            details={"slice_key": slice_key, "phase_title": phase_title},
+        ),
         "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
         "execution_status": "completed",
         "slice_key": slice_key,
@@ -1011,13 +1063,29 @@ def _execute_audit_turn(
         }
     )
     audit_status = coerce_str(audit_result.get("audit_status")).strip() or "reopen_execution"
+    route_outcome = {
+        "accepted": "accept",
+        "reopen_execution": "reopen_execution",
+        "replan_design": "replan_design",
+    }.get(audit_status, "route_to_decision")
+    audit_summary = {
+        "accepted": "Audit accepted the current round.",
+        "reopen_execution": "Audit reopened the round and returned it to execution.",
+        "replan_design": "Audit requested a new design contract before execution can continue.",
+    }.get(audit_status, "Audit completed.")
     return {
         "status": audit_status,
-        "summary": {
-            "accepted": "Audit accepted the current round.",
-            "reopen_execution": "Audit reopened the round and returned it to execution.",
-            "replan_design": "Audit requested a new design contract before execution can continue.",
-        }.get(audit_status, "Audit completed."),
+        "summary": audit_summary,
+        "supervisor_event": _supervisor_event(
+            kind="supervisor_route_outcome",
+            summary=audit_summary,
+            outcome=route_outcome,
+            subject="audit",
+            details={
+                "audit_status": audit_status,
+                "execution_artifact_path": audit_result.get("execution_artifact_path", execution_artifact_path),
+            },
+        ),
         "artifacts": [str(request_artifact_path), str(result_artifact_path), str(artifact_path)],
         "audit_status": audit_status,
         "findings": audit_result.get("findings", []),
@@ -1069,3 +1137,6 @@ def _execute_cleanup_turn(
         "follow_up_required": bool(repo_hygiene_findings),
         "artifacts": [str(artifact_path)],
     }
+
+
+

@@ -8,4 +8,6 @@ Escalate to the human only when the active work hits:
 - external side effect with cost or irreversible impact
 - unresolved conflict between project goals
 
-The `communication-agent` is the only human-facing escalation path.
+`decision-agent` is the semantic boundary for blocker triage and human judgment.
+`communication-agent` is not a supervisor target role and is not the escalation path.
+The supervisor still owns the final routing outcome and must record it explicitly.
