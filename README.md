@@ -107,7 +107,7 @@ The current implementation now uses that shape as the mainline runtime.
 - document- and code-mutating agents run inside supervisor-managed worktrees
 - human interaction stays behind explicit supervisor gates
 
-Treat [memory/doc/harness-architecture.md](/C:/Users/oql/OneDrive/Study/AIMA-refactor/harness-engineering/memory/doc/harness-architecture.md) as the source of truth for the intended boundary.
+Treat [memory/doc/architecture/harness-architecture.md](/C:/Users/oql/OneDrive/Study/AIMA-refactor/harness-engineering/memory/doc/architecture/harness-architecture.md) as the source of truth for the intended boundary.
 
 ## Runtime State
 
@@ -231,7 +231,7 @@ Harness should treat these documents as the current implementation baseline:
 - `docs/designs/2026-03-25-client-and-worker-runtime-design.md`
 - `docs/designs/2026-03-25-harness-engineering-integration.md`
 - `docs/plans/2026-03-25-task-mainline-and-engineernode-removal.md`
-- `harness-engineering/memory/doc/aima-refactor-implementation-baseline.md`
+- `harness-engineering/memory/doc/baselines/aima-refactor-implementation-baseline.md`
 
 ## Current Implementation
 
