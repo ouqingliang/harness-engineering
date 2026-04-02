@@ -440,6 +440,75 @@ class RuntimeFileTests(unittest.TestCase):
 
             self.assertEqual(updated.get("heartbeat_at"), heartbeat_at)
 
+    def test_save_launcher_state_mirrors_public_substrate_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_root = Path(temp_dir)
+            paths = ensure_runtime_layout(memory_root)
+            request_path = paths.artifacts_dir / "cycle-001" / "00-execution-request.json"
+            result_path = paths.artifacts_dir / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = memory_root / ".launcher-private" / "execution" / "state.json"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "goal": "Mirror launcher state into the frozen substrate",
+                        "assigned_worktree": "C:/worktrees/execution",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "summary": "执行结果已写入共享 substrate",
+                        "gate_id": "gate-001",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            updated = save_launcher_state(
+                launcher_state_path=launcher_state_path,
+                request_path=request_path,
+                result_path=result_path,
+                payload={
+                    "status": "completed",
+                    "agent_id": "execution",
+                    "active_run_id": "cycle-001-00",
+                    "last_request_path": str(request_path),
+                    "last_result_path": str(result_path),
+                    "completed_at": "2026-04-02T00:00:01Z",
+                    "heartbeat_at": "2026-04-02T00:00:00Z",
+                },
+            )
+
+            record_id = "launcher-execution-cycle-001-00"
+            session_record = read_session_metadata(session_metadata_path(memory_root, record_id))
+            inbox_record = read_inbox_message(inbox_message_path(memory_root, f"{record_id}-request"))
+            brief_record = read_brief_record(brief_record_path(memory_root, record_id))
+            gate_record = read_gate_record(gate_record_path(memory_root, "gate-001"))
+            event_rows = load_jsonl_rows(event_log_path(memory_root, record_id))
+            artifact_record = json.loads(
+                (paths.artifacts_dir / "launchers" / f"{record_id}.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(updated["status"], "completed")
+            self.assertEqual(session_record["agent_id"], "execution")
+            self.assertEqual(session_record["status"], "completed")
+            self.assertEqual(session_record["request_path"], str(request_path))
+            self.assertEqual(inbox_record["assigned_worktree"], "C:/worktrees/execution")
+            self.assertEqual(brief_record["summary"], "执行结果已写入共享 substrate")
+            self.assertEqual(gate_record["gate_id"], "gate-001")
+            self.assertEqual(event_rows[-1]["status"], "completed")
+            self.assertEqual(artifact_record["result"]["summary"], "执行结果已写入共享 substrate")
+
     def test_pid_identity_match_beats_executable_name_difference(self) -> None:
         payload = {
             "pid": 26688,
@@ -833,10 +902,11 @@ class RuntimeFileTests(unittest.TestCase):
             )
             workspace_root = root / "workspace"
             workspace_root.mkdir(parents=True, exist_ok=True)
-            request_path = root / "artifacts" / "cycle-001" / "00-design-request.json"
-            result_path = root / "artifacts" / "cycle-001" / "00-design-result.json"
-            launcher_state_path = root / "launchers" / "design" / "state.json"
-            launcher_run_path = root / "launchers" / "design" / "runs" / "cycle-001-00.json"
+            paths = ensure_runtime_layout(root)
+            request_path = paths.artifacts_dir / "cycle-001" / "00-design-request.json"
+            result_path = paths.artifacts_dir / "cycle-001" / "00-design-result.json"
+            launcher_state_path = root / ".launcher-private" / "design" / "state.json"
+            launcher_run_path = root / ".launcher-private" / "design" / "runs" / "cycle-001-00.json"
             request_payload = {
                 "doc_bundle": {
                     "doc_count": 1,
@@ -898,6 +968,18 @@ class RuntimeFileTests(unittest.TestCase):
             payload = json.loads(result_path.read_text(encoding="utf-8"))
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["design_status"], "ready")
+            session_record = read_session_metadata(session_metadata_path(root, "launcher-design-cycle-001-00"))
+            inbox_record = read_inbox_message(inbox_message_path(root, "launcher-design-cycle-001-00-request"))
+            brief_record = read_brief_record(brief_record_path(root, "launcher-design-cycle-001-00"))
+            event_rows = load_jsonl_rows(event_log_path(root, "launcher-design-cycle-001-00"))
+            artifact_record_path = paths.artifacts_dir / "launchers" / "launcher-design-cycle-001-00.json"
+
+            self.assertEqual(session_record["agent_id"], "design")
+            self.assertEqual(session_record["request_path"], str(request_path))
+            self.assertEqual(inbox_record["selected_primary_doc"], "plan.md")
+            self.assertTrue(brief_record["summary"])
+            self.assertTrue(event_rows)
+            self.assertTrue(artifact_record_path.exists())
 
 
 if __name__ == "__main__":

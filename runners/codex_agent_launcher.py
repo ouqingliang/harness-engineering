@@ -52,10 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     common_kwargs = {
-        "request_path": Path(args.request_path),
-        "result_path": Path(args.result_path),
-        "launcher_state_path": Path(args.launcher_state_path),
-        "launcher_run_path": Path(args.launcher_run_path),
+        "request_path": Path(args.request_path).resolve(),
+        "result_path": Path(args.result_path).resolve(),
+        "launcher_state_path": Path(args.launcher_state_path).resolve(),
+        "launcher_run_path": Path(args.launcher_run_path).resolve(),
     }
     save_launcher_state(
         launcher_state_path=common_kwargs["launcher_state_path"],

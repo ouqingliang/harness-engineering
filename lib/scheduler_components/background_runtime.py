@@ -7,7 +7,25 @@ import subprocess
 import sys
 from typing import Any, Mapping
 
-from ..runtime_state import coerce_int, coerce_str, read_json_file, utc_now
+from ..runtime_state import (
+    HARNESS_DIR_NAME,
+    append_event_row,
+    brief_record_path,
+    coerce_int,
+    coerce_str,
+    ensure_runtime_layout,
+    event_log_path,
+    gate_record_path,
+    inbox_message_path,
+    read_json_file,
+    session_metadata_path,
+    utc_now,
+    write_brief_record,
+    write_gate_record,
+    write_inbox_message,
+    write_json_file,
+    write_session_metadata,
+)
 from .support import HARNESS_ROOT, _git_status_snapshot, _write_json
 
 PID_MISMATCH_FAILURE_GRACE_SECONDS = 120
@@ -56,6 +74,137 @@ def _launcher_failure_payload(
     }
 
 
+def _read_optional_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = read_json_file(path)
+    except Exception:
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _launcher_memory_root(request_path: Path, result_path: Path, launcher_state_path: Path) -> Path:
+    for candidate in (request_path, result_path, launcher_state_path):
+        resolved = candidate.resolve()
+        for parent in (resolved.parent, *resolved.parents):
+            if parent.name == HARNESS_DIR_NAME:
+                return parent.parent
+    return request_path.parents[2] if len(request_path.parents) >= 3 else request_path.parent
+
+
+def _launcher_record_id(
+    *,
+    agent_id: str,
+    request_path: Path,
+    payload: Mapping[str, Any],
+    existing_state: Mapping[str, Any],
+) -> str:
+    active_run_id = coerce_str(payload.get("active_run_id")).strip() or coerce_str(existing_state.get("active_run_id")).strip()
+    suffix = active_run_id or request_path.stem
+    return f"launcher-{coerce_str(agent_id).strip() or 'unknown'}-{suffix}"
+
+
+def _persist_launcher_substrate_records(
+    *,
+    launcher_state_path: Path,
+    request_path: Path,
+    result_path: Path,
+    payload: Mapping[str, Any],
+    existing_state: Mapping[str, Any],
+) -> None:
+    agent_id = coerce_str(payload.get("agent_id") or existing_state.get("agent_id")).strip()
+    if not agent_id:
+        return
+    memory_root = _launcher_memory_root(request_path, result_path, launcher_state_path)
+    paths = ensure_runtime_layout(memory_root)
+    record_id = _launcher_record_id(
+        agent_id=agent_id,
+        request_path=request_path,
+        payload=payload,
+        existing_state=existing_state,
+    )
+    request_payload = _read_optional_json(request_path)
+    result_payload = _read_optional_json(result_path)
+    status = coerce_str(payload.get("status") or existing_state.get("status")).strip().lower()
+    summary = (
+        coerce_str(result_payload.get("summary")).strip()
+        or coerce_str(payload.get("summary")).strip()
+        or f"{agent_id} launcher {status or 'updated'}"
+    )
+    session_payload = {
+        "session_id": record_id,
+        "agent_id": agent_id,
+        "status": status,
+        "request_path": str(request_path),
+        "result_path": str(result_path),
+        "launcher_state_path": str(launcher_state_path),
+        "active_run_id": coerce_str(payload.get("active_run_id")).strip() or coerce_str(existing_state.get("active_run_id")).strip(),
+        "pid": coerce_int(payload.get("pid") if payload.get("pid") is not None else existing_state.get("pid"), 0),
+        "heartbeat_at": coerce_str(payload.get("heartbeat_at") or existing_state.get("heartbeat_at")).strip(),
+        "started_at": coerce_str(payload.get("started_at") or existing_state.get("started_at")).strip(),
+        "completed_at": coerce_str(payload.get("completed_at") or existing_state.get("completed_at")).strip(),
+    }
+    write_session_metadata(session_metadata_path(memory_root, record_id), session_payload)
+    inbox_payload = {
+        "message_id": f"{record_id}-request",
+        "agent_id": agent_id,
+        "request_path": str(request_path),
+        "result_path": str(result_path),
+        "assigned_worktree": coerce_str(request_payload.get("assigned_worktree")).strip(),
+        "selected_primary_doc": coerce_str(request_payload.get("selected_primary_doc")).strip(),
+        "recorded_at": coerce_str(payload.get("heartbeat_at") or payload.get("completed_at") or utc_now()).strip() or utc_now(),
+    }
+    write_inbox_message(inbox_message_path(memory_root, f"{record_id}-request"), inbox_payload)
+    write_brief_record(
+        brief_record_path(memory_root, record_id),
+        {
+            "brief_id": record_id,
+            "agent_id": agent_id,
+            "summary": summary,
+            "status": status,
+            "result_path": str(result_path),
+        },
+    )
+    gate_id = coerce_str(result_payload.get("gate_id") or payload.get("gate_id")).strip()
+    if gate_id:
+        write_gate_record(
+            gate_record_path(memory_root, gate_id),
+            {
+                "gate_id": gate_id,
+                "agent_id": agent_id,
+                "status": status or "open",
+                "title": summary,
+                "result_path": str(result_path),
+            },
+        )
+    artifact_record_path = paths.artifacts_dir / "launchers" / f"{record_id}.json"
+    write_json_file(
+        artifact_record_path,
+        {
+            "record_id": record_id,
+            "agent_id": agent_id,
+            "request_path": str(request_path),
+            "result_path": str(result_path),
+            "request": request_payload,
+            "result": result_payload,
+            "launcher_state": dict(payload),
+        },
+    )
+    append_event_row(
+        event_log_path(memory_root, record_id),
+        {
+            "event": f"launcher.{status or 'updated'}",
+            "agent_id": agent_id,
+            "session": record_id,
+            "status": status,
+            "summary": summary,
+            "request_path": str(request_path),
+            "result_path": str(result_path),
+        },
+    )
+
+
 def save_launcher_state(
     *,
     launcher_state_path: Path,
@@ -81,6 +230,13 @@ def save_launcher_state(
             if existing_value not in (None, "") and key not in normalized:
                 normalized[key] = existing_value
     _write_json(launcher_state_path, normalized)
+    _persist_launcher_substrate_records(
+        launcher_state_path=launcher_state_path,
+        request_path=request_path,
+        result_path=result_path,
+        payload=normalized,
+        existing_state=existing_state,
+    )
     return normalized
 
 
