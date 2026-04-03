@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import tempfile
@@ -62,6 +62,51 @@ def _effective_worktrees_dir(worktrees_dir: Path, project_root: Path) -> Path:
     return (base_root / repo_key).resolve()
 
 
+def _gitmodules_config_map(project_root: Path, field: str) -> dict[str, str]:
+    completed = _run_git(
+        project_root,
+        ["config", "--file", ".gitmodules", "--get-regexp", rf"^submodule\..*\.{field}$"],
+    )
+    if completed.returncode == 1:
+        return {}
+    if completed.returncode != 0:
+        raise WorktreeError(
+            completed.stderr.strip() or completed.stdout.strip() or f"git config .gitmodules {field} lookup failed"
+        )
+    entries: dict[str, str] = {}
+    prefix = "submodule."
+    suffix = f".{field}"
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        key, _, value = line.partition(" ")
+        if not _ or not key.startswith(prefix) or not key.endswith(suffix):
+            continue
+        name = key[len(prefix) : -len(suffix)]
+        normalized = value.strip()
+        if name and normalized:
+            entries[name] = normalized
+    return entries
+
+
+def _configured_submodule_paths(project_root: Path) -> list[str]:
+    if not (project_root / ".gitmodules").is_file():
+        return []
+    paths_by_name = _gitmodules_config_map(project_root, "path")
+    urls_by_name = _gitmodules_config_map(project_root, "url")
+    return [path for name, path in sorted(paths_by_name.items()) if name in urls_by_name]
+
+
+def _hydrate_supervised_worktree_submodules(*, project_root: Path, worktree_root: Path) -> None:
+    submodule_paths = _configured_submodule_paths(project_root)
+    if not submodule_paths:
+        return
+    hydrated = _run_git(worktree_root, ["submodule", "update", "--init", "--recursive", "--", *submodule_paths])
+    if hydrated.returncode != 0:
+        raise WorktreeError(hydrated.stderr.strip() or hydrated.stdout.strip() or "git submodule update failed")
+
+
 def ensure_supervised_worktree(
     *,
     worktrees_dir: Path,
@@ -84,6 +129,7 @@ def ensure_supervised_worktree(
     if path.exists():
         current_common_dir = worktree_common_dir(path)
         if current_common_dir == repo_common_dir:
+            _hydrate_supervised_worktree_submodules(project_root=canonical_root, worktree_root=path)
             return {
                 "name": name,
                 "path": str(path),
@@ -93,6 +139,7 @@ def ensure_supervised_worktree(
     created = _run_git(canonical_root, ["worktree", "add", "--detach", "--force", str(path), "HEAD"])
     if created.returncode != 0:
         raise WorktreeError(created.stderr.strip() or created.stdout.strip() or "git worktree add failed")
+    _hydrate_supervised_worktree_submodules(project_root=canonical_root, worktree_root=path)
     return {
         "name": name,
         "path": str(path),
@@ -130,6 +177,10 @@ def _parse_status_entry(line: str) -> tuple[str, list[str]]:
     return "copy", [raw]
 
 
+def _is_runtime_owned_path(relative_path: str) -> bool:
+    return ".harness" in PurePosixPath(relative_path).parts
+
+
 def promote_worktree_to_project_root(
     *,
     worktree_root: Path,
@@ -143,9 +194,12 @@ def promote_worktree_to_project_root(
     for line in _status_lines(worktree_root):
         action, paths = _parse_status_entry(line)
         if action == "rename" and len(paths) == 2:
-            old_path = canonical_root / paths[0]
-            new_source = worktree_root / paths[1]
-            new_target = canonical_root / paths[1]
+            old_relative_path, new_relative_path = paths
+            if _is_runtime_owned_path(old_relative_path) or _is_runtime_owned_path(new_relative_path):
+                continue
+            old_path = canonical_root / old_relative_path
+            new_source = worktree_root / new_relative_path
+            new_target = canonical_root / new_relative_path
             if old_path.exists():
                 if old_path.is_dir():
                     shutil.rmtree(old_path)
@@ -156,6 +210,8 @@ def promote_worktree_to_project_root(
             actions.append({"action": "rename", "from": str(old_path), "to": str(new_target)})
             continue
         relative_path = paths[0]
+        if _is_runtime_owned_path(relative_path):
+            continue
         source = worktree_root / relative_path
         target = canonical_root / relative_path
         if action == "delete":

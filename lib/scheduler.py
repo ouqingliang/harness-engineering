@@ -51,7 +51,7 @@ from .worktree import (
 
 
 DEFAULT_CLEANUP_MAINTENANCE_INTERVAL_SECONDS = 4 * 60 * 60
-ARCHITECTURE_BASELINE_DOCS = (
+DEFAULT_PREFERRED_BASELINE_DOCS = (
     "designs/2026-03-25-task-centered-autonomous-ops-platform.md",
     "designs/2026-03-25-harness-engineering-integration.md",
     "designs/2026-03-25-center-subsystem-architecture-outline.md",
@@ -380,7 +380,13 @@ def _available_doc_paths(doc_bundle: Mapping[str, Any]) -> list[str]:
 
 def _preferred_baseline_docs(doc_bundle: Mapping[str, Any]) -> list[str]:
     available = set(_available_doc_paths(doc_bundle))
-    preferred = [path for path in ARCHITECTURE_BASELINE_DOCS if path in available]
+    configured = [
+        path for path in _normalize_text_list(doc_bundle.get("preferred_baseline_docs", [])) if path in available
+    ]
+    if configured:
+        return configured
+
+    preferred = [path for path in DEFAULT_PREFERRED_BASELINE_DOCS if path in available]
     if preferred:
         return preferred
 
@@ -408,7 +414,7 @@ def _preferred_planning_doc(doc_bundle: Mapping[str, Any]) -> str:
     docs = doc_bundle.get("docs", [])
     if not isinstance(docs, list):
         docs = []
-    for preferred in ARCHITECTURE_BASELINE_DOCS:
+    for preferred in _preferred_baseline_docs(doc_bundle):
         if preferred.startswith("plans/"):
             for record in docs:
                 if not isinstance(record, Mapping):
@@ -743,6 +749,9 @@ class HarnessScheduler:
 
     def _refresh_doc_bundle(self) -> None:
         bundle = build_doc_bundle(self.mission.doc_root)
+        preferred_baseline_docs = _normalize_text_list(self.mission.extra.get("preferred_baseline_docs", []))
+        if preferred_baseline_docs:
+            bundle["preferred_baseline_docs"] = preferred_baseline_docs
         self.mission.extra["doc_bundle"] = bundle
         self.mission.extra["doc_count"] = bundle["doc_count"]
         self.mission.extra["doc_digest"] = bundle["doc_digest"]

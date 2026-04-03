@@ -15,6 +15,13 @@ decision_gate_tags:
 # Run maintenance cleanup on a longer cadence when the runtime stays alive.
 cleanup_maintenance_interval_seconds: 14400
 
+# Preferred baseline docs for the scheduler to read first.
+preferred_baseline_docs:
+  - designs/2026-03-25-task-centered-autonomous-ops-platform.md
+  - designs/2026-03-25-harness-engineering-integration.md
+  - designs/2026-03-25-center-subsystem-architecture-outline.md
+  - plans/2026-03-25-task-mainline-and-engineernode-removal.md
+
 # Preferred launcher for specialist agents.
 default_launcher: codex_app_server
 

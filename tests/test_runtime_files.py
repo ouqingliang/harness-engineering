@@ -48,7 +48,12 @@ from lib.scheduler_components.background_runtime import (
     load_launcher_status,
     save_launcher_state,
 )
-from lib.scheduler_components.execution import DEFAULT_EXECUTION_OUTPUT, _run_execution_subagent_from_saved_request
+from lib.scheduler_components.execution import (
+    DEFAULT_EXECUTION_OUTPUT,
+    _execution_output_schema,
+    _execution_prompt,
+    _run_execution_subagent_from_saved_request,
+)
 
 
 class RuntimeFileTests(unittest.TestCase):
@@ -641,12 +646,123 @@ class RuntimeFileTests(unittest.TestCase):
             command = next(
                 call.args[0]
                 for call in run_mock.call_args_list
-                if call.args and isinstance(call.args[0], list) and call.args[0][:3] == ["codex", "exec", "resume"]
+                if call.args and isinstance(call.args[0], list) and call.args[0][:2] == ["codex", "exec"]
             )
-            self.assertEqual(command[:4], ["codex", "exec", "resume", session_id])
-            self.assertEqual(command[4], "Continue after the last human reply.")
+            self.assertEqual(command[:5], ["codex", "exec", "-C", str(workspace_root), "resume"])
+            self.assertEqual(command[5], session_id)
+            self.assertEqual(command[6], "-")
+            self.assertEqual(run_mock.call_args.kwargs["input"], "Continue after the last human reply.")
             self.assertEqual(payload["session_id"], session_id)
             self.assertTrue(payload["ok"])
+
+    def test_saved_execution_request_uses_stdin_prompt_for_spawn_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace_root = root / "workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = root / "launchers" / "execution" / "state.json"
+            launcher_run_path = root / "launchers" / "execution" / "runs" / "cycle-001-00.json"
+            schema_path = request_path.with_name("00-execution-request-schema.json")
+            output_path = root / "artifacts" / "cycle-001" / "00-execution-result.message.json"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "workspace_root": str(workspace_root),
+                        "prompt": "Implement the approved slice silently, then return the final JSON only.",
+                        "codex_executable": "codex",
+                        "schema_path": str(schema_path),
+                        "output_path": str(output_path),
+                        "recorded_at": "2026-03-27T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "status": "implemented",
+                        "summary": "Implemented the approved slice.",
+                        "changed_paths": [],
+                        "verification_notes": [],
+                        "needs_human": False,
+                        "human_question": "",
+                        "why_not_auto_answered": "",
+                        "required_reply_shape": "",
+                        "decision_tags": [],
+                        "options": [],
+                        "notes": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec"],
+                returncode=0,
+                stdout="",
+                stderr="session id: 11111111-2222-4333-8444-555555555555\n",
+            )
+            with patch(
+                "lib.scheduler_components.execution.subprocess.run",
+                return_value=completed,
+            ) as run_mock, patch(
+                "lib.scheduler_components.execution._git_status_snapshot",
+                return_value={"entries": [], "ok": True},
+            ):
+                payload = _run_execution_subagent_from_saved_request(
+                    request_path=request_path,
+                    result_path=result_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                )
+
+            command = run_mock.call_args.args[0]
+            self.assertEqual(command[:3], ["codex", "exec", "-"])
+            self.assertIn("--output-schema", command)
+            self.assertEqual(
+                run_mock.call_args.kwargs["input"],
+                "Implement the approved slice silently, then return the final JSON only.",
+            )
+            self.assertEqual(payload["session_state"], "terminal")
+
+    def test_execution_prompt_frontloads_final_json_contract(self) -> None:
+        prompt = _execution_prompt(
+            workspace_root=Path("C:/tmp/worktree"),
+            canonical_project_root=Path("C:/tmp/project"),
+            design_contract={
+                "selected_phase": {"title": "Phase 2: Replace the center data mainline"},
+                "proposed_slice": "Advance the approved slice.",
+                "work_items": ["replace the center data mainline"],
+                "target_paths": ["src/center/app/models/**"],
+                "acceptance_criteria": ["new task APIs exist"],
+            },
+            baseline_docs=["docs/designs/example.md"],
+            planning_doc="docs/plans/example.md",
+            human_decisions=[],
+            supervisor_brief=None,
+        )
+
+        lines = prompt.splitlines()
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertIn("only user-visible response", lines[0].lower())
+        self.assertIn("final json", lines[0].lower())
+        self.assertIn("do all reading, editing, and testing silently", lines[1].lower())
+        self.assertIn("for project", lines[4].lower())
+
+    def test_execution_output_schema_requires_all_option_item_properties(self) -> None:
+        schema = _execution_output_schema()
+        option_item = schema["properties"]["options"]["items"]
+
+        self.assertEqual(option_item["required"], ["label", "value", "description"])
 
     def test_saved_execution_request_detects_session_requested_task_again_without_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -816,6 +932,63 @@ class RuntimeFileTests(unittest.TestCase):
                 args=["codex", "exec"],
                 returncode=0,
                 stdout="Using `using-superpowers` to align with the required skill workflow for this session.\n",
+                stderr=f"session id: {session_id}\n",
+            )
+
+            with patch(
+                "lib.scheduler_components.execution.subprocess.run",
+                return_value=completed,
+            ), patch(
+                "lib.scheduler_components.execution._git_status_snapshot",
+                return_value={"entries": [], "ok": True},
+            ):
+                payload = _run_execution_subagent_from_saved_request(
+                    request_path=request_path,
+                    result_path=result_path,
+                    launcher_state_path=launcher_state_path,
+                    launcher_run_path=launcher_run_path,
+                )
+
+            self.assertEqual(payload["session_id"], session_id)
+            self.assertEqual(payload["session_state"], "requested_task_again")
+
+    def test_saved_execution_request_detects_repo_execution_agent_workflow_ready_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace_root = root / "workspace"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            request_path = root / "artifacts" / "cycle-001" / "00-execution-request.json"
+            result_path = root / "artifacts" / "cycle-001" / "00-execution-result.json"
+            launcher_state_path = root / "launchers" / "execution" / "state.json"
+            launcher_run_path = root / "launchers" / "execution" / "runs" / "cycle-001-00.json"
+            schema_path = request_path.with_name("00-execution-request-schema.json")
+            output_path = root / "artifacts" / "cycle-001" / "00-execution-result.message.json"
+            session_id = "11111111-2222-4333-8444-555555555555"
+            request_path.parent.mkdir(parents=True, exist_ok=True)
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "workspace_root": str(workspace_root),
+                        "prompt": "Implement the approved slice.",
+                        "codex_executable": "codex",
+                        "schema_path": str(schema_path),
+                        "output_path": str(output_path),
+                        "recorded_at": "2026-03-27T00:00:00Z",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_path.write_text(
+                json.dumps(DEFAULT_EXECUTION_OUTPUT, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec"],
+                returncode=0,
+                stdout="I'm aligning with the repo's execution-agent workflow first... Ready for the execution task.\n",
                 stderr=f"session id: {session_id}\n",
             )
 

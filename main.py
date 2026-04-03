@@ -105,9 +105,30 @@ def load_harness_config(config_path: Path) -> HarnessConfig:
     return HarnessConfig.from_mapping(load_config_mapping(config_path))
 
 
-def build_or_update_mission(config: HarnessConfig, *, doc_root: Path) -> Mission:
+def _configured_preferred_baseline_docs(config: HarnessConfig) -> list[str]:
+    raw = config.extra.get("preferred_baseline_docs", [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _resolve_project_root(doc_root: Path, project_root: Path | None) -> Path:
+    if project_root is not None:
+        return project_root.resolve()
+    return project_root_from_doc_root(doc_root)
+
+
+def build_or_update_mission(
+    config: HarnessConfig,
+    *,
+    doc_root: Path,
+    project_root: Path | None = None,
+) -> Mission:
     doc_bundle = build_doc_bundle(doc_root)
-    project_root = project_root_from_doc_root(doc_root)
+    preferred_baseline_docs = _configured_preferred_baseline_docs(config)
+    if preferred_baseline_docs:
+        doc_bundle["preferred_baseline_docs"] = preferred_baseline_docs
+    resolved_project_root = _resolve_project_root(doc_root, project_root)
     goal = config.goal or doc_bundle["summary"] or f"Process docs under {doc_root}"
     return Mission(
         doc_root=str(doc_root.resolve()),
@@ -119,7 +140,8 @@ def build_or_update_mission(config: HarnessConfig, *, doc_root: Path) -> Mission
             "doc_count": doc_bundle["doc_count"],
             "doc_digest": doc_bundle["doc_digest"],
             "primary_docs": doc_bundle["primary_docs"],
-            "project_root": str(project_root),
+            "project_root": str(resolved_project_root),
+            "preferred_baseline_docs": preferred_baseline_docs,
             "decision_gate_tags": list(config.decision_gate_tags),
             "cleanup_maintenance_interval_seconds": config.cleanup_maintenance_interval_seconds,
             "human_decisions": [],
@@ -132,11 +154,12 @@ def load_or_reset_runtime(
     config: HarnessConfig,
     *,
     doc_root: Path,
+    project_root: Path | None,
     force_reset: bool,
 ) -> tuple[Mission, RuntimeState]:
     paths = ensure_runtime_root(config.memory_root)
     if force_reset or not paths.mission_file.exists():
-        mission = build_or_update_mission(config, doc_root=doc_root)
+        mission = build_or_update_mission(config, doc_root=doc_root, project_root=project_root)
         state = RuntimeState(
             active_agent="design",
             last_successful_agent="",
@@ -157,9 +180,19 @@ def load_or_reset_runtime(
     if current_gate_tags != list(config.decision_gate_tags):
         mission.extra["decision_gate_tags"] = list(config.decision_gate_tags)
         mission_changed = True
-    expected_project_root = str(project_root_from_doc_root(doc_root))
+    expected_project_root = str(_resolve_project_root(doc_root, project_root))
     if str(mission.extra.get("project_root", "")) != expected_project_root:
         mission.extra["project_root"] = expected_project_root
+        mission_changed = True
+    preferred_baseline_docs = _configured_preferred_baseline_docs(config)
+    current_preferred = mission.extra.get("preferred_baseline_docs", [])
+    normalized_current_preferred = (
+        [str(item).strip() for item in current_preferred if str(item).strip()]
+        if isinstance(current_preferred, (list, tuple))
+        else []
+    )
+    if normalized_current_preferred != preferred_baseline_docs:
+        mission.extra["preferred_baseline_docs"] = preferred_baseline_docs
         mission_changed = True
     current_cleanup_interval = int(mission.extra.get("cleanup_maintenance_interval_seconds", 0) or 0)
     if current_cleanup_interval != config.cleanup_maintenance_interval_seconds:
@@ -168,7 +201,7 @@ def load_or_reset_runtime(
     if mission_changed:
         save_mission(paths.memory_root, mission)
     if Path(mission.doc_root).resolve() != doc_root.resolve():
-        mission = build_or_update_mission(config, doc_root=doc_root)
+        mission = build_or_update_mission(config, doc_root=doc_root, project_root=project_root)
         state = RuntimeState(
             active_agent="design",
             last_successful_agent="",
@@ -210,6 +243,7 @@ def command_inspect(argv: list[str]) -> int:
 def command_run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the Harness Engineering loop against a doc root.")
     parser.add_argument("--doc-root", required=True, help="project doc root")
+    parser.add_argument("--project-root", help="override canonical project root")
     parser.add_argument("--goal", help="override mission goal")
     parser.add_argument("--memory-root", help="override runtime memory root")
     parser.add_argument("--host", help="communication host")
@@ -234,11 +268,20 @@ def command_run(argv: list[str]) -> int:
     if not doc_root.exists():
         print(f"error: doc root does not exist: {doc_root}", file=sys.stderr)
         return 1
+    project_root = Path(args.project_root) if args.project_root else None
+    if project_root is not None and not project_root.exists():
+        print(f"error: project root does not exist: {project_root}", file=sys.stderr)
+        return 1
 
     specs = load_all_specs()
     validate_specs(specs)
     paths = ensure_runtime_root(config.memory_root)
-    mission, state = load_or_reset_runtime(config, doc_root=doc_root, force_reset=args.reset)
+    mission, state = load_or_reset_runtime(
+        config,
+        doc_root=doc_root,
+        project_root=project_root,
+        force_reset=args.reset,
+    )
     scheduler = HarnessScheduler(specs=specs, paths=paths, mission=mission, state=state)
 
     server = None

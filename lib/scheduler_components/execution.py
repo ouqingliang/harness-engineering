@@ -28,6 +28,24 @@ from .support import (
 )
 
 
+def _execution_project_identity(
+    *,
+    design_contract: Mapping[str, Any],
+    canonical_project_root: Path,
+) -> str:
+    for key in ("project_name", "project_title", "repo_name", "display_name"):
+        value = coerce_str(design_contract.get(key)).strip()
+        if value:
+            return value
+    root_name = canonical_project_root.resolve().name.strip()
+    if root_name:
+        return root_name
+    project_root = coerce_str(design_contract.get("project_root")).strip()
+    if project_root:
+        return Path(project_root).name or project_root
+    return "the target project"
+
+
 def _execution_output_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -50,7 +68,7 @@ def _execution_output_schema() -> dict[str, Any]:
                         "value": {"type": "string"},
                         "description": {"type": "string"},
                     },
-                    "required": ["label", "value"],
+                    "required": ["label", "value", "description"],
                     "additionalProperties": False,
                 },
             },
@@ -59,6 +77,12 @@ def _execution_output_schema() -> dict[str, Any]:
         "required": list(DEFAULT_EXECUTION_OUTPUT.keys()),
         "additionalProperties": False,
     }
+
+
+def _resolve_harness_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path.resolve()
+    return (HARNESS_ROOT / path).resolve()
 
 
 def _execution_prompt(
@@ -74,8 +98,16 @@ def _execution_prompt(
     selected_phase = design_contract.get("selected_phase", {})
     if not isinstance(selected_phase, Mapping):
         selected_phase = {}
+    project_identity = _execution_project_identity(
+        design_contract=design_contract,
+        canonical_project_root=canonical_project_root,
+    )
     lines = [
-        "You are the Harness execution-agent for AIMA-refactor.",
+        "Your first and only user-visible response must be the final JSON object that matches the provided schema.",
+        "Do all reading, editing, and testing silently inside the assigned worktree. Do not emit progress updates, setup notes, role acknowledgements, or readiness-only messages.",
+        "If you need to inspect repo instructions or baseline docs, do that work silently before the final JSON response.",
+        "",
+        f"You are the Harness execution-agent for {project_identity}.",
         "You were dispatched as a subagent to execute a specific already-assigned slice inside an existing harness run.",
         "This is not a new top-level conversation. Skip startup-only meta workflow and act on the assigned slice immediately.",
         "The using-superpowers startup skill SUBAGENT-STOP clause applies here.",
@@ -273,6 +305,10 @@ def _prepare_execution_request(
     request_path: Path,
     result_path: Path,
 ) -> dict[str, Any]:
+    resolved_request_path = _resolve_harness_path(request_path)
+    resolved_result_path = _resolve_harness_path(result_path)
+    resolved_schema_path = resolved_request_path.with_name(resolved_request_path.stem + "-schema.json")
+    resolved_output_path = resolved_result_path.with_suffix(".message.json")
     prompt = _execution_prompt(
         workspace_root=workspace_root,
         canonical_project_root=canonical_project_root,
@@ -309,11 +345,11 @@ def _prepare_execution_request(
         ),
         "prompt": prompt,
         "codex_executable": _find_codex_executable(),
-        "schema_path": str(request_path.with_name(request_path.stem + "-schema.json")),
-        "output_path": str(result_path.with_suffix(".message.json")),
+        "schema_path": str(resolved_schema_path),
+        "output_path": str(resolved_output_path),
         "recorded_at": utc_now(),
     }
-    _write_json(request_path, request_payload)
+    _write_json(resolved_request_path, request_payload)
     return request_payload
 
 
@@ -324,6 +360,10 @@ def _run_execution_subagent_from_saved_request(
     launcher_state_path: Path,
     launcher_run_path: Path,
 ) -> dict[str, Any]:
+    request_path = request_path.resolve()
+    result_path = result_path.resolve()
+    launcher_state_path = launcher_state_path.resolve()
+    launcher_run_path = launcher_run_path.resolve()
     request_payload = json.loads(request_path.read_text(encoding="utf-8"))
     workspace_root = Path(coerce_str(request_payload.get("workspace_root"))).resolve()
     prompt = coerce_str(request_payload.get("prompt")).strip()
@@ -342,8 +382,8 @@ def _run_execution_subagent_from_saved_request(
     else:
         resume_session_id = ""
     started_at = coerce_str(request_payload.get("recorded_at")).strip() or utc_now()
-    schema_path = Path(coerce_str(request_payload.get("schema_path")).strip())
-    output_path = Path(coerce_str(request_payload.get("output_path")).strip())
+    schema_path = _resolve_harness_path(Path(coerce_str(request_payload.get("schema_path")).strip()))
+    output_path = _resolve_harness_path(Path(coerce_str(request_payload.get("output_path")).strip()))
     launcher_state_path.parent.mkdir(parents=True, exist_ok=True)
     launcher_run_path.parent.mkdir(parents=True, exist_ok=True)
     save_launcher_state(
@@ -406,11 +446,11 @@ def _run_execution_subagent_from_saved_request(
         command = [
             codex_executable,
             "exec",
-            "resume",
-            resume_session_id,
-            prompt,
             "-C",
             str(workspace_root),
+            "resume",
+            resume_session_id,
+            "-",
             "--dangerously-bypass-approvals-and-sandbox",
             "-o",
             str(output_path),
@@ -423,7 +463,7 @@ def _run_execution_subagent_from_saved_request(
         command = [
             codex_executable,
             "exec",
-            prompt,
+            "-",
             "-C",
             str(workspace_root),
             "--dangerously-bypass-approvals-and-sandbox",
@@ -438,6 +478,7 @@ def _run_execution_subagent_from_saved_request(
         capture_output=True,
         text=True,
         encoding="utf-8",
+        input=prompt,
         check=False,
     )
     parsed_output = dict(DEFAULT_EXECUTION_OUTPUT)
