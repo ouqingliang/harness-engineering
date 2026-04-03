@@ -78,8 +78,9 @@ Current commands:
 
 - `python main.py inspect`
   - print the local agent topology
-- `python main.py run --doc-root <path>`
+- `python main.py run --doc-root <path> [--project-root <path>] [--memory-root <path>]`
   - load the UTF-8 planning and design docs under `<path>`
+  - use `--project-root` when the target repository root should not be inferred by walking upward from `--doc-root`
   - initialize `<memory_root>/.harness/`
   - start or resume the long-running supervisor loop
   - auto-answer ordinary blockers
@@ -193,6 +194,16 @@ Run the harness from a project doc root:
 python main.py run --doc-root path/to/project/docs --memory-root runtime-memory --reset
 ```
 
+If the target project root is not the nearest `.git` ancestor of `--doc-root`, pass it explicitly:
+
+```bash
+python main.py run \
+  --doc-root path/to/project/docs \
+  --project-root path/to/project \
+  --memory-root runtime-memory \
+  --reset
+```
+
 This command starts the human-facing behavior by default:
 
 - it starts the local human reply page
@@ -220,6 +231,115 @@ Open the printed local URL in a browser, read the decision brief, and reply ther
 The communication surface is for runtime inspection and human communication only.
 `main.py run` remains the only supported runtime entry for advancing the harness state machine.
 Human replies also go through `.harness/answers/`, so the runtime can resume after restart.
+
+## How Targeting Works
+
+The runtime uses three distinct roots:
+
+- `harness root`
+  - the directory containing `main.py`
+  - this repository is where the runtime code, agent specs, and launcher logic live
+- `project root`
+  - the canonical repository root the harness is trying to modify or verify
+  - by default it is inferred by walking upward from `--doc-root` until a `.git` directory is found
+  - if that inference is wrong or too implicit, pass `--project-root` explicitly
+- `memory root`
+  - the directory passed to `--memory-root`
+  - the runtime writes `<memory_root>/.harness/` under it for mission state, reports, artifacts, gates, and launcher state
+
+If you want predictable behavior across multiple projects, prefer always passing all three concepts explicitly through:
+
+- the current harness checkout
+- `--doc-root`
+- `--project-root`
+- `--memory-root`
+
+## How Requirements Are Read
+
+The harness does not read a single task file.
+It builds the current mission from the UTF-8 docs under `--doc-root`.
+
+The document scan currently reads:
+
+- `.md`
+- `.markdown`
+- `.txt`
+- `.rst`
+
+The runtime then derives:
+
+- `primary_docs`
+  - docs whose names suggest `readme`, `index`, `overview`, `plan`, `design`, or `architecture`
+- `baseline_docs`
+  - preferred design and architecture docs that should be read first
+- `planning_doc`
+  - the plan doc used to select the active slice or phase
+- `gate_signals`
+  - explicit human-decision markers such as `[decision-gate]`
+
+For the most stable planning behavior, structure plan docs like this:
+
+```md
+### Phase 1: Some Title
+
+Goals
+- ...
+- ...
+
+File Targets
+- src/foo/**
+- tests/bar/**
+
+Done Criteria
+- ...
+- ...
+```
+
+## Using Other Projects
+
+This runtime can now target repositories other than `AIMA-refactor`.
+
+Recommended invocation:
+
+```bash
+python main.py run \
+  --doc-root C:/path/to/other-project/docs \
+  --project-root C:/path/to/other-project \
+  --memory-root C:/path/to/runtime/other-project-run-001 \
+  --reset
+```
+
+Recommended target-project shape:
+
+```text
+other-project/
+  .git/
+  docs/
+    README.md
+    architecture.md
+    plan.md
+```
+
+Recommended practice:
+
+- keep the docs in UTF-8
+- provide at least one design or architecture document
+- provide at least one planning document with explicit phases
+- use a fresh `--memory-root` for each independent run
+
+## Baseline Doc Preference
+
+The scheduler can prefer a configured baseline-doc set before falling back to filename heuristics.
+
+Configure that in `config.yaml` through:
+
+```yaml
+preferred_baseline_docs:
+  - designs/...
+  - plans/...
+```
+
+If the configured paths are absent from the current `doc_root`, the runtime falls back to its normal ranking logic.
 
 ## Architecture Baseline
 
